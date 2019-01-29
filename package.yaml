@@ -1,0 +1,80 @@
+name:                haskell-tinywl
+version:             0.0.0.0
+github:              "SimulaVR/haskell-tinywl"
+license:             BSD3
+author:              "Simula Team"
+maintainer:          "simulavr@gmail.com"
+copyright:           "2019 SimulaVR"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/SimulaVR/haskell-tinywl#readme>
+
+dependencies:
+  - base >= 4.7 && < 5
+  - containers
+  - lens
+  - clock
+  - stm
+  - raw-strings-qq
+  - inline-c
+  - libinput
+  - hsroots
+  - hayland
+  - xkbcommon
+
+pkg-config-dependencies:
+  - wlroots
+  - xkbcommon
+  - udev
+  - wayland-server
+  - libinput
+
+ghc-options:
+  - -Wall
+  - -fwarn-tabs
+  - -fno-warn-unused-do-bind
+  - -fwarn-incomplete-uni-patterns
+  - -fwarn-incomplete-record-updates
+  - -fobject-code 
+
+default-extensions:
+  - MultiParamTypeClasses
+  - FunctionalDependencies
+  - FlexibleContexts
+  - FlexibleInstances
+#   - QuasiQuotes
+#   - TemplateHaskell
+#   - LambdaCase
+#   - NamedFieldPuns
+#   - OverloadedStrings
+#   - PatternSynonyms
+#   - TypeApplications
+#   - TypeOperators
+
+library:
+  source-dirs: src
+
+
+executables:
+  haskell-tinywl-exe:
+    main:                Main.hs
+    source-dirs:         app
+    dependencies:
+    - haskell-tinywl
+
+tests:
+  haskell-tinywl-test:
+    main:                Spec.hs
+    source-dirs:         test
+    dependencies:
+    - haskell-tinywl
