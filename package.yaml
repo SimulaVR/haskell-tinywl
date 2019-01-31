@@ -39,6 +39,11 @@ pkg-config-dependencies:
   - wayland-server
   - libinput
 
+c-sources:
+   - cbits/xdg-shell-protocol.c
+include-dirs:
+  - include
+
 ghc-options:
   - -Wall
   - -fwarn-tabs

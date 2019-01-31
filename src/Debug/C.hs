@@ -49,6 +49,7 @@ data C'WlrSeat
 data C'WlrOuutputLayout
 data C'WlrInputDevice
 data C'WlrXdgSurface
+data C'WlrEventKeyboardKey
   
 data C'WlListener -- HsRoots treats this type subtly; see Marshal.hs and Signal.hsc in HsRoots
 
@@ -81,6 +82,7 @@ initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
   ,  (C.Struct "wlr_output_layout", [t|C'WlrOutputLayout|])
   ,  (C.Struct "wlr_input_device", [t|C'WlrInputDevice|])
   ,  (C.Struct "wlr_xdg_surface", [t|C'WlrXdgSurface|])
+  ,  (C.Struct "wlr_event_keyboard_key", [t|C'WlrEventKeyboardKey|])
   -- Omitted XKB Types: xkb_keysym_t, xkb_state, xkb_rule_names, xkb_context, xkb_keymap
 -- (C.TypeName "wl_shm_format_argb8888", [t|C'WlShmFormatArgb8888|])
 -- (C.TypeName "wl_keyboard_key_state", [t|C'WlKeyboardKeyState|])
@@ -107,6 +109,7 @@ initializeTinyWLCtxAndIncludes = do
   C.include "<wlr/types/wlr_pointer.h>"
   C.include "<wlr/types/wlr_seat.h>"
   C.include "<wlr/types/wlr_xcursor_manager.h>"
+  C.include "<wlr/types/wlr_xdg_shell.h>"
   C.include "<wlr/util/log.h>"
   C.include "<xkbcommon/xkbcommon.h>"
   C.include "<assert.h>"
