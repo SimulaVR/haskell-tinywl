@@ -22,7 +22,7 @@ import Graphics.Wayland.WlRoots.Compositor
 import Graphics.Wayland.WlRoots.Output
 import Graphics.Wayland.WlRoots.Surface
 import Graphics.Wayland.WlRoots.Backend
-import      Graphics.Wayland.Signal
+import Graphics.Wayland.Signal
 
 import Data.Coerce
 
@@ -50,6 +50,8 @@ data C'WlrOuutputLayout
 data C'WlrInputDevice
 data C'WlrXdgSurface
 data C'WlrEventKeyboardKey
+data C'WlrSeatPointerState
+data C'WlrSeatClient
   
 data C'WlListener -- HsRoots treats this type subtly; see Marshal.hs and Signal.hsc in HsRoots
 
@@ -83,6 +85,8 @@ initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
   ,  (C.Struct "wlr_input_device", [t|C'WlrInputDevice|])
   ,  (C.Struct "wlr_xdg_surface", [t|C'WlrXdgSurface|])
   ,  (C.Struct "wlr_event_keyboard_key", [t|C'WlrEventKeyboardKey|])
+  ,  (C.Struct "wlr_seat_pointer_state", [t|C'WlrSeatPointerState|])
+  ,  (C.Struct "wlr_seat_client", [t|C'WlrSeatClient|])
   -- Omitted XKB Types: xkb_keysym_t, xkb_state, xkb_rule_names, xkb_context, xkb_keymap
 -- (C.TypeName "wl_shm_format_argb8888", [t|C'WlShmFormatArgb8888|])
 -- (C.TypeName "wl_keyboard_key_state", [t|C'WlKeyboardKeyState|])

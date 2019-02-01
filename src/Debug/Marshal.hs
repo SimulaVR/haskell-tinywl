@@ -166,6 +166,13 @@ instance FFI (Ptr C'WlrXdgSurface) (Ptr WlrXdgSurface) where
   toC2HS = castPtr
   toInlineC = castPtr
 
+instance FFI (Ptr C'WlrSeatPointerState) (Ptr WlrSeatPointerState) where
+  toC2HS = castPtr
+  toInlineC = castPtr
+
+instance FFI (Ptr C'WlrSeatClient) (Ptr WlrSeatClient) where
+  toC2HS = castPtr
+  toInlineC = castPtr
 
 -- |This function allows us to cast to HsRoot's `newtype WlListener a = WlListener (Ptr a -> IO ())`.
 -- |AFAIK, there is no straightforward way to add these types to FFI.

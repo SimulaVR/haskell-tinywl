@@ -15,9 +15,13 @@ import           Debug.Marshal
 
 import           Text.XkbCommon.Keysym
 import           Text.XkbCommon.KeyboardState
+import           Text.XkbCommon.InternalTypes
+import           Text.XkbCommon.Context
+import           Text.XkbCommon.Keymap
 
 import           Graphics.Wayland.Server
 import           Graphics.Wayland.Internal.Server
+import           Graphics.Wayland.Internal.SpliceServerTypes
 import           Graphics.Wayland.WlRoots.Compositor
 import           Graphics.Wayland.WlRoots.Output
 import           Graphics.Wayland.WlRoots.Surface
@@ -32,12 +36,17 @@ import           Graphics.Wayland.WlRoots.Cursor
 import           Graphics.Wayland.WlRoots.XCursorManager
 import           Graphics.Wayland.WlRoots.XdgShell
 import           Graphics.Wayland.WlRoots.Input.Keyboard
+import           Graphics.Wayland.WlRoots.Input.Pointer
+import           Graphics.Wayland.WlRoots.Cursor
 
 import           System.Clock
 
 -- Turn on inline-C for select calls that hsroots doesn't provide.
 C.initializeTinyWLCtxAndIncludes
 
+data OutputLayoutCoordinates = OutputLayoutCoordinates (Int, Int)
+data SurfaceLocalCoordinates = SurfaceLocalCoordinates (Double, Double) -- I believe each Double ranges from 0 to 1
+  
 data TinyWLCursorMode = TinyWLCursorPassthrough | TinyWLCursorMove |  TinyWLCursorResize
 
 data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
@@ -54,7 +63,7 @@ data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
                                  , _tsSeat :: Ptr WlrSeat
                                  , _tsNewInput :: WlListener ()
                                  , _tsRequestCursor :: WlListener ()
-                                 , _tsKeyboards :: TVar [Ptr WlrKeyboard]
+                                 , _tsKeyboards :: TVar [TinyWLKeyboard]
                                  , _tsCursorMode :: TinyWLCursorMode
                                  , _tsGrabbedView :: TinyWLView
                                  , _tsGrabX :: Double
@@ -79,14 +88,13 @@ data TinyWLView = TinyWLView { _tvServer :: TinyWLServer
                              , _tvRequestMove :: WlListener ()
                              , _tvRequestResize :: WlListener ()
                              , _tvMapped :: Bool
-                             , _tvX :: Int
-                             , _tvY :: Int
+                             , _tvOutputLayoutCoordinates :: OutputLayoutCoordinates -- Denotes top-left corner x-coordinate of view in output layout space
                              }
 
 data TinyWLKeyboard = TinyWLKeyboard { _tkServer :: TinyWLServer
                                      , _tkDevice :: Ptr InputDevice
                                      , _tkModifiers :: WlListener ()
-                                     , _tkKey :: WlListener ()
+                                     , _tkKey :: WlListener EventKey
                                      }
 
 data RenderData = RenderData { _rdOutput :: Ptr WlrOutput
@@ -154,7 +162,7 @@ focusView tinyWLView ptrWlrSurface = do
 -- | A wl_listener that (i) sets the TinyWLKeyboard as active in the seat (since
 -- | wayland forces us to have one active keyboard as a time per seat) and (ii) sends
 -- | the modifier keys to the client.
-keyboardHandleModifiers :: TinyWLKeyboard -> WlListener TinyWLKeyboard
+keyboardHandleModifiers :: TinyWLKeyboard -> WlListener ()
 keyboardHandleModifiers tinyWLKeyboard = WlListener $ \ptrTinyWlKeyboard -> -- We're getting the same argument twice because this pointer scares me (don't understand where it's coming from)
   do let ptrWlrSeat     = (_tsSeat (_tkServer tinyWLKeyboard))
      let ptrInputDevice = (_tkDevice tinyWLKeyboard)
@@ -179,42 +187,128 @@ handleKeybinding :: TinyWLServer -> xkb_keysym_t -> IO (Bool)
 handleKeybinding _ _ = do putStrLn "haskell-tinywl doesn't implement compositor-level keyboard shortcuts."
                           return False -- Returning False means "this function failed to find a valid combo to process this keybinding."
 
-keyboardHandleKey :: TinyWLKeyboard -> WlListener WlrEventKeyboardKey
-keyboardHandleKey tinyWLKeyboard = WlListener $ \ptrEventKey -> -- instance Storable: [[file:~/hsroots/src/Graphics/Wayland/WlRoots/Input/Keyboard.hsc::instance%20Storable%20EventKey%20where]] 
-  {-
-  do server <-(_tkServer tinyWLKeyboard)
-     eventKey <- (peek ptrEventKey)
-     let seat = (_tsSeat server)
-     let eventKeyKeyCode = (keyCode eventKey)
-     let eventKeyKeyCode8 = eventKeyKeyCode + 8;
-     (_tkDevice tinyWLKeyboard)
-  -}
-     
+-- | This function is the handler for key presses. It (i) sets the keyboard as the
+-- | active one in the wayland seat and (ii) notifies the client about the keypress.
+keyboardHandleKey :: TinyWLKeyboard -> WlListener EventKey
+keyboardHandleKey tinyWLKeyboard = WlListener $ \ptrEventKey ->
+  do event               <- (peek ptrEventKey) -- EventKey ∈ Storable
+     let server          =  (_tkServer tinyWLKeyboard)
+     let seat            =  (_tsSeat server)
+     let device          =  (_tkDevice tinyWLKeyboard)
+     let eventKeyState   =  (state event)
+     let eventKeyTimeSec =  (timeSec event)
+     let eventKeyKeyCode =  (keyCode event)
 
--- getStateSyms :: KeyboardState -> CKeycode -> IO [Keysym]
+     -- Here is where we could check if the key event is a compositor-level shortcut
+     -- i.e., an <alt> + <key> combo, and process it via `handleKeybinding`.
 
-  -- let eventKeyState = (state eventKey)
-  -- let eventKeyTimeSec = (timeSec eventKey)
-     -- ptrXkbKeysymTSysms <- 
-     -- xkb_state_key_get_syms 
+     seatSetKeyboard seat device
+     keyboardNotifyKey seat eventKeyTimeSec eventKeyKeyCode eventKeyState
 
-serverNewKeyboard :: TinyWLServer -> Ptr InputDevice
-serverNewKeyboard = undefined
--- (_tkServer tinyWLKeyboard)
--- let seat = (_tsSeat server)
+-- | This function "initializes" a wlr_input_device (second argument) into a
+-- | wlr_keyboard. To do so it (i) constructs a bunch of XKB state to load into the
+-- | keyboard; (ii) sets the keyboard's repeat info; (iii) attaches the
+-- | keyboardHandleModifiers & keyboardHandleKey wl_listener's to the wlr_keyboard's
+-- | "key" and "modifiers" signals respectively. It finally sets the keyboard as
+-- | active (relative to our seat) and adds it to the head of the server's keyboard
+-- | list.
+serverNewKeyboard :: TinyWLServer -> Ptr InputDevice -> IO ()
+serverNewKeyboard server device = do
+  let tinyWLKeyboard = TinyWLKeyboard { _tkServer    = server                                   :: TinyWLServer
+                                      , _tkDevice    = device                                   :: Ptr InputDevice
+                                      , _tkModifiers = (keyboardHandleModifiers tinyWLKeyboard) :: WlListener ()
+                                      , _tkKey       = (keyboardHandleKey       tinyWLKeyboard) :: WlListener EventKey
+                                      }
 
-serverNewPointer :: TinyWLServer -> Ptr InputDevice
-serverNewPointer = undefined
+  deviceType <- inputDeviceType device
+  maybeXkbContext <- newContext defaultFlags
 
-serverNewInput :: WlListener TinyWLServer
-serverNewInput = undefined
--- let seat = (_tsSeat server)
-seatRequestCursor :: WlListener TinyWLServer
-seatRequestCursor = undefined
--- let seat = (_tsSeat server)
+  case (deviceType, maybeXkbContext) of
+       ((DeviceKeyboard ptrWlrKeyboard), (Just xkbContext)) -> handleKeyboard tinyWLKeyboard ptrWlrKeyboard xkbContext
+       _ -> putStrLn "Failed to get keyboard!"
+  where handleKeyboard :: TinyWLKeyboard -> Ptr WlrKeyboard -> Context -> IO ()
+        handleKeyboard tinyWLKeyboard deviceKeyboard context = do
+          maybeKeymap <- newKeymapFromNames context noPrefs
+          case maybeKeymap of
+               Nothing       -> putStrLn "Failed to get keymap!"
+               (Just keymap) -> do setKeymapAndRepeatInfo deviceKeyboard keymap
+                                   handleSignals tinyWLKeyboard deviceKeyboard
+                                   makeKeyboardActiveHead tinyWLKeyboard
 
-viewAt :: TinyWLView -> Double -> Double -> Ptr (Ptr WlrSurface) -> Double -> Double -> Bool
+        setKeymapAndRepeatInfo :: Ptr WlrKeyboard -> Keymap -> IO ()
+        setKeymapAndRepeatInfo keyboard keymap = do
+          withKeymap keymap (\keyMapC -> setKeymap keyboard keyMapC)
+          let keyboard' = toInlineC keyboard
+          [C.exp| void { wlr_keyboard_set_repeat_info($(struct wlr_keyboard * keyboard'), 25, 600) }|] -- hsroots doesn't provide this call.
+
+        handleSignals :: TinyWLKeyboard -> Ptr WlrKeyboard -> IO ()
+        handleSignals tinyWLKeyboard keyboard = do
+          let keyboardSignals = getKeySignals keyboard
+          let keySignalKey' = (keySignalKey keyboardSignals)
+          let keySignalModifiers' = (keySignalModifiers keyboardSignals)
+          addListener (_tkModifiers tinyWLKeyboard) keySignalModifiers' -- a = TinyWLKeyboard
+          addListener (_tkKey tinyWLKeyboard)       keySignalKey' -- a = EventKey
+          return ()
+
+        makeKeyboardActiveHead :: TinyWLKeyboard -> IO ()
+        makeKeyboardActiveHead tinyWLKeyboard = do
+          seatSetKeyboard (_tsSeat server) (_tkDevice tinyWLKeyboard)
+          keyboardList <- atomically $ readTVar (_tsKeyboards server)
+          atomically $ writeTVar (_tsKeyboards server) ([tinyWLKeyboard] ++ keyboardList)
+
+-- | Here we just wrap a call to wlr_cursor_attach_input_device. The reason this function is so simple is that we all pointer handling is proxied through wlr_cursor by default. VR inputs will likely involve studying wlr_cursor in detail to see how it handles motion events.
+serverNewPointer :: TinyWLServer -> Ptr InputDevice -> IO ()
+serverNewPointer tinyWLServer device = do
+  let cursor = (_tsCursor tinyWLServer)
+  attachInputDevice cursor device
+
+-- | This wl_listener is called when TinyWL gets a new wlr_input_device. We (i)
+-- | inspect the wlr_input_device to see whether it is a keyboard or a pointer,
+-- | passing it to serverNew* accordingly; (ii) set the wlr_seat's "capabilities" as
+-- | either "mouse" or "mouse + keyboard", depending upon whether the server's
+-- | keyboard list is empty or not.
+serverNewInput :: TinyWLServer -> WlListener InputDevice
+serverNewInput tinyWLServer = WlListener $ \device ->
+  do deviceType <- inputDeviceType device
+     let seat = (_tsSeat tinyWLServer)
+     return ()
+     case deviceType of
+         (DeviceKeyboard _) -> (serverNewKeyboard tinyWLServer device)
+         (DevicePointer  _) -> (serverNewPointer tinyWLServer  device)
+         _                  -> putStrLn "TinyWL does not know how to handle this input type."
+     -- Note that Graphics.Wayland.Internal.SpliceServerTypes code generates the following:
+     --   newtype SeatCapability = SeatCapability GHC.Types.Int
+     -- Now see: https://github.com/swaywm/hsroots/blob/f9b07af96dff9058a3aac59eba5a608a91801c0a/src/Graphics/Wayland/WlRoots/Input.hsc#L48
+     let mouseCapability = SeatCapability (deviceTypeToInt (DevicePointer undefined))
+     let keyboardCapability = SeatCapability (deviceTypeToInt (DeviceKeyboard undefined))
+     let mouseCapabilities = [mouseCapability] :: [SeatCapability]
+     let allCapabilities = [mouseCapability, keyboardCapability] :: [SeatCapability]
+     keyboardList <- atomically $ readTVar (_tsKeyboards tinyWLServer)
+     let capabilities = if (null keyboardList)
+                            then mouseCapabilities
+                            else allCapabilities
+     setSeatCapabilities seat capabilities
+
+-- | When a seat raises wlr_seat_pointer_request_set_cursor_event (when a client
+-- | provides cursor image), this handler (which just wraps wlr_cursor_set_surface)
+-- | is called.
+seatRequestCursor :: TinyWLServer -> WlListener SetCursorEvent
+seatRequestCursor tinyWLServer = WlListener $ \ptrSetCursorEvent ->
+  do setCursorEvent <- peek ptrSetCursorEvent -- [[file:~/hsroots/src/Graphics/Wayland/WlRoots/Seat.hsc::instance%20Storable%20SetCursorEvent%20where]] 
+     let clientRequester = (toInlineC $ unSeatClient $ seatCursorSurfaceClient setCursorEvent) :: Ptr C'WlrSeatClient
+     let seat = toInlineC (_tsSeat tinyWLServer)
+     focusedClient <- [C.exp| struct wlr_seat_client * { $(struct wlr_seat * seat)->pointer_state.focused_client } |] -- hsroots doesn't provide access to this data structure AFAIK
+     let cursor = (_tsCursor tinyWLServer)
+     let surface = seatCursorSurfaceSurface setCursorEvent
+     let hotspotX = seatCursorSurfaceHotspotX setCursorEvent
+     let hotspotY = seatCursorSurfaceHotspotY setCursorEvent
+
+     when (clientRequester == focusedClient) $ setCursorSurface cursor surface hotspotX hotspotY -- Since this event can be called by any client, we first make sure the client that triggered it actually has seat focus
+
+viewAt :: TinyWLView -> OutputLayoutCoordinates -> IO (Maybe (Ptr WlrSurface, SurfaceLocalCoordinates))
+-- viewAt :: TinyWLView -> Double -> Double -> Ptr (Ptr WlrSurface) -> Double -> Double -> Bool
 viewAt = undefined
+-- [[file:~/hsroots/src/Graphics/Wayland/WlRoots/XdgShell.hsc::xdgSurfaceAt%20::%20Ptr%20WlrXdgSurface%20->%20Double%20->%20Double%20->%20IO%20(Maybe%20(Ptr%20WlrSurface,%20Double,%20Double))]]
 
 desktopViewAt :: TinyWLServer -> Double -> Double -> Ptr (Ptr WlrSurface) -> Double -> Double -> TinyWLView
 desktopViewAt  = undefined
