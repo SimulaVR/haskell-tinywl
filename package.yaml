@@ -31,6 +31,7 @@ dependencies:
   - hsroots
   - hayland
   - xkbcommon
+  - extra
 
 pkg-config-dependencies:
   - wlroots
