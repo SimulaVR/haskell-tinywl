@@ -3,12 +3,15 @@
 
 module TinyWL where
 
+import           Control.Lens hiding (Context)
 import           Control.Concurrent.STM.TVar
 import           Control.Monad
 import           Control.Monad.STM
 import           Data.Maybe
 
 import           Foreign
+import           Foreign.Ptr
+import           Foreign.Marshal.Alloc
 import           Foreign.C.Types
 import qualified Language.C.Inline as C
 import           Debug.C as C
@@ -39,7 +42,7 @@ import           Graphics.Wayland.WlRoots.XdgShell
 import           Graphics.Wayland.WlRoots.Input.Keyboard
 import           Graphics.Wayland.WlRoots.Input.Pointer
 import           Graphics.Wayland.WlRoots.Cursor
-
+import           Graphics.Wayland.WlRoots.Input.Buttons
 import           System.Clock
 import           Control.Monad.Extra
 
@@ -52,7 +55,9 @@ C.initializeTinyWLCtxAndIncludes
 data OutputLayoutCoordinates = OutputLayoutCoordinates (Double, Double) -- Depending upon the context, we can be working with Int or Double.
 data SurfaceLocalCoordinates = SurfaceLocalCoordinates (Double, Double) -- SurfaceLocalCoordinates are at the same scale as OutputLayoutCoordinates, despite being in Double
 data SubSurfaceLocalCoordinates = SubSurfaceLocalCoordinates (Double, Double) -- "
-  
+
+data SurfaceDimension = SurfaceDimension (Int, Int)
+
 data TinyWLCursorMode = TinyWLCursorPassthrough | TinyWLCursorMove |  TinyWLCursorResize
 
 data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
@@ -70,7 +75,7 @@ data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
                                  , _tsNewInput :: WlListener ()
                                  , _tsRequestCursor :: WlListener ()
                                  , _tsKeyboards :: TVar [TinyWLKeyboard]
-                                 , _tsCursorMode :: TinyWLCursorMode
+                                 , _tsCursorMode :: TVar (TinyWLCursorMode)
                                  , _tsGrabbedView :: TinyWLView
                                  , _tsGrab :: TVar SurfaceLocalCoordinates -- The surface-local point at which a surface is grabbed.
                                  , _tsGrabWidth :: Int
@@ -102,17 +107,27 @@ data TinyWLKeyboard = TinyWLKeyboard { _tkServer :: TinyWLServer
                                      , _tkKey :: WlListener EventKey
                                      }
 
+-- Used to move all of the data necessary to render a surface from the top-level
+-- frame handler to the per-surface render function.
 data RenderData = RenderData { _rdOutput :: Ptr WlrOutput
-                             , _rdrRenderer :: Ptr Renderer
+                             , _rdRenderer :: Ptr Renderer
                              , _rdView :: TinyWLView
                              , _rdWhen :: TimeSpec
                              }
+
+makeLenses ''TinyWLServer
+makeLenses ''TinyWLView
+makeLenses ''TinyWLKeyboard
+makeLenses ''RenderData
 
 -- | Helper function to convert Haskell timestamps to milliseconds (which wlroots expects) for C marshalling.
 toMsec32 :: TimeSpec -> IO (Word32)
 toMsec32 timeSpec = do
   let msec = fromIntegral $ toNanoSecs timeSpec `div` 1000000
   return msec
+
+toTimeSpec :: (Integral a) => a -> TimeSpec
+toTimeSpec word = (let nsec = (fromIntegral word) * 1000000 in fromNanoSecs nsec)
 
 -- | We will say that two views are "the same" when they have the same Ptr WlrXdgSurface (this is
 -- | is a bad idea long-term but for now will suffice; for example, we might have two
@@ -369,7 +384,6 @@ processCursorMove tinyWLServer _ = do
    cursorLX <- getCursorX cursor
    cursorLY <- getCursorY cursor
    let cursorPosition = OutputLayoutCoordinates (cursorLX, cursorLY)
-
    let newGrabbedViewTopLeft = OutputLayoutCoordinates (cursorLX - surfaceGrabPointSX, cursorLY - surfaceGrabPointSY)
    atomically $ writeTVar (_tvOutputLayoutCoordinates (_tsGrabbedView tinyWLServer)) newGrabbedViewTopLeft
 
@@ -390,7 +404,7 @@ processCursorResize _ _ = do
 -- | that previously had focus.
 processCursorMotion :: TinyWLServer -> TimeSpec -> IO ()
 processCursorMotion tinyWLServer timeSpec = do
-  let cursorMode = (_tsCursorMode tinyWLServer)
+  cursorMode <- atomically $ readTVar (_tsCursorMode tinyWLServer)
   case cursorMode of
        TinyWLCursorMove -> processCursorMove tinyWLServer timeSpec
        TinyWLCursorResize -> processCursorResize tinyWLServer timeSpec
@@ -424,23 +438,154 @@ processCursorMotion tinyWLServer timeSpec = do
             when focusChanged       $ pointerNotifyEnter seat subSurfaceAtPoint ssx ssy -- This automatically gives the surface "pointer focus", which is distinct from keyboard focus. TODO: Ensure this doesn't cause issue with VR, where we have two controllers potentially fighting for focus.
             when (not focusChanged) $ pointerNotifyMotion seat msec32 ssx ssy
 
-serverCursorMotion :: WlListener ()
-serverCursorMotion = undefined
+-- | The cursor forwards this event when a pointer emits _relative_ motion (i.e., dx
+-- | & dy). WlRoots automatically ensures relative pointer motion can't cause a
+-- | pointer to escape the boundaries of our output layout.
 
-serverCursorMotionAbsolute :: WlListener ()
-serverCursorMotionAbsolute = undefined
+-- | I'm not sure how VR motion will handle relative motion. Need we simulate it for
+-- | proper VR input functionality? It appears from glancing at the source that this
+-- | function ultimately wraps `wlr_output_cursor_move`, which just
+-- | changes cursor state (and doesn't seem to indicate we need to simulate relative
+-- | cursor movement in VR). See also `serverCursorMotionAbsolute`.
+serverCursorMotion :: TinyWLServer -> WlListener WlrEventPointerMotion
+serverCursorMotion tinyWLServer = WlListener $ \ptrEventPointerMotion -> do
+  eventPointerMotion     <- peek ptrEventPointerMotion
+  let eventDevice        = eventPointerMotionDevice eventPointerMotion
+  let eventTimeMSec      = eventPointerMotionTime eventPointerMotion
+  let eventDeltaX        = eventPointerMotionDeltaX eventPointerMotion
+  let eventDeltaY        = eventPointerMotionDeltaY eventPointerMotion
+  let cursor             = (tinyWLServer ^. tsCursor)
+  moveCursor cursor (Just eventDevice) eventDeltaX eventDeltaY -- Causes _relative_ pointer motion, and I *think* ultimately just modifies *cursor state*
+  processCursorMotion tinyWLServer (toTimeSpec eventTimeMSec) -- Wraps our motion handlers and emits events to clients; see above.
 
-serverCursorButton :: WlListener ()
-serverCursorButton = undefined
--- let seat = (_tsSeat server)
+-- | Same as serverCursorMotion except sends cursor to absolute position (in output
+-- | layout space). This is normally used when running our compositor in, i.e., an
+-- | X11 window (say when the X11 cursor moves into our compositor from one of the edges);
+-- | however, it's likely we'll use this heavily for VR inputs that constantly emit
+-- | absolute pointer motion.
+serverCursorMotionAbsolute :: TinyWLServer -> WlListener WlrEventPointerAbsMotion
+serverCursorMotionAbsolute tinyWLServer = WlListener $ \ptrEventPointerMotionAbs -> do
+  eventPointerMotionAbs                <- peek ptrEventPointerMotionAbs
+  let OutputLayoutCoordinates (lx, ly) = OutputLayoutCoordinates (eventPointerAbsMotionX eventPointerMotionAbs,
+                                                                  eventPointerAbsMotionY eventPointerMotionAbs)
+  let device                           = eventPointerAbsMotionDevice eventPointerMotionAbs
+  let eventTimeMSec32                  = eventPointerAbsMotionTime eventPointerMotionAbs
+  let cursor                           = (tinyWLServer ^. tsCursor)
+  warpCursorAbs cursor (Just device) (Just lx) (Just ly) -- Forces cursor to output layout coordinates (lx, ly)
+  processCursorMotion tinyWLServer (toTimeSpec eventTimeMSec32) -- Wraps our motion handlers and emits events to clients; see above.
+  -- warpCursorAbs :: Ptr WlrCursor -> Maybe (Ptr InputDevice) -> Maybe Double -> Maybe Double -> IO ()
+  -- moveCursor cursor (Just eventDevice) eventDeltaX eventDeltaY -- Causes _relative_ pointer motion, and I *think* ultimately just modifies *cursor state*
+  return ()
 
-serverCursorAxis :: WlListener ()
-serverCursorAxis = undefined
--- let seat = (_tsSeat server)
+-- | This event is forwarded by the cursor when a pointer emits a button event.
+serverCursorButton :: TinyWLServer -> WlListener WlrEventPointerButton
+serverCursorButton tinyWLServer = WlListener $ \ptrEventPointerButton -> do
+  let seat = (tinyWLServer ^. tsSeat)
+  eventPointerButton <- peek ptrEventPointerButton
+  let device = eventPointerButtonDevice eventPointerButton :: Ptr InputDevice
+  let time32 = eventPointerButtonTime   eventPointerButton :: Word32
+  let button =  eventPointerButtonButton eventPointerButton :: Word32
+  let buttonState =  eventPointerButtonState  eventPointerButton :: ButtonState
+  let cursor = (tinyWLServer ^. tsCursor)
+  cursorLX <- getCursorX cursor
+  cursorLY <- getCursorY cursor
+  let cursorPosition = OutputLayoutCoordinates (cursorLX, cursorLY)
+  maybeViewAtCursorPoint <- desktopViewAt tinyWLServer cursorPosition
 
-renderSurface  :: Ptr WlrSurface -> Int -> Int -> Ptr () -> IO ()
-renderSurface  = undefined
+  pointerNotifyButton seat time32 button buttonState -- Notify the client with pointer focus that a button press has ocurred.
 
+  case (buttonState, maybeViewAtCursorPoint) of
+       (ButtonReleased, _)                     -> atomically $ writeTVar (tinyWLServer ^. tsCursorMode) TinyWLCursorPassthrough
+       (ButtonPressed, Just viewAtCursorPoint) ->  do (surfaceAtCursorPoint, _) <- fromJust <$> viewAt viewAtCursorPoint cursorPosition
+                                                      focusView viewAtCursorPoint surfaceAtCursorPoint -- Ensure the keyboard has focus if there's a view at point
+       (ButtonPressed, Nothing) -> return ()
+
+
+-- | This event is forwarded by the cursor when a pointer emits an "axis event". for
+-- | example when you move the scroll wheel (we'll use this VR touchpad scrolling).
+serverCursorAxis :: TinyWLServer -> WlListener WlrEventPointerAxis
+serverCursorAxis tinyWLServer = WlListener $ \ptrEventPointerAxis -> do
+  let seat            = (tinyWLServer ^. tsSeat)
+  event               <- peek ptrEventPointerAxis
+  let device          = eventPointerAxisDevice event      :: Ptr InputDevice
+  let time32          = eventPointerAxisTime event        :: Word32
+  let axisSource      = eventPointerAxisSource event      :: AxisSource
+  let axisOrientation = eventPointerAxisOrientation event :: AxisOrientation
+  let axisDeltaValue  = eventPointerAxisDelta event       :: Double
+  let axisDiscrete    = eventPointerAxisDiscrete event    :: Int32
+  pointerNotifyAxis seat time32 axisOrientation axisDeltaValue axisDiscrete
+
+-- | Takes a surface of dimension (sx, sy) alongside a RenderData (output, renderer,
+-- | TinyWLView, and a timespec) and (i) generates a matrix transform to (ii) render
+-- | the surface and finally (iii) tell the client that we're done rendering so it
+-- | can start drawing the next frame. This particular function uses a wlr_box (a
+-- | rectangle with a point inside it) to help generate the matrix (the rectangle
+-- | represents an output with the surface location in output-local coordinates).
+-- | Since we're going to use our own custom VR rendering with Simula/Godot, this is
+-- | just an inline-C function.
+renderSurface  :: Ptr WlrSurface -> SurfaceDimension -> RenderData -> IO ()
+renderSurface  ptrWlrSurface surfaceDimension@(SurfaceDimension (sx, sy)) renderData = do
+  let tinyWLView = (renderData ^. rdView)
+  viewLocation@(OutputLayoutCoordinates (lx, ly)) <- atomically $ readTVar (tinyWLView ^. tvOutputLayoutCoordinates)
+
+  -- Inline-C types
+  let ptrWlrOutputLayout' = toInlineC (_tsOutputLayout (tinyWLView ^. tvServer)) :: Ptr C'WlrOutputLayout
+  let ptrWlrSurface'      = toInlineC ptrWlrSurface                              :: Ptr C'WlrSurface
+  let ptrWlrOutput'       = toInlineC (renderData ^. rdOutput)                   :: Ptr C'WlrOutput
+  let (sx', sy')          = (fromIntegral sx, fromIntegral sy)                   :: (CInt, CInt)
+  let (lx', ly')          = (realToFrac lx, realToFrac ly)                       :: (CDouble, CDouble)
+  let renderer'           = toInlineC (renderData ^. rdRenderer)
+
+  -- Dangerous memory allocation, but we free it at the end of this function.
+  let timeSpec            = (renderData ^. rdWhen)                               :: TimeSpec
+  ptrTimeSpec             <- malloc                                              :: IO (Ptr TimeSpec)
+  poke                    ptrTimeSpec timeSpec
+
+  [C.exp| void {struct wlr_output        * output        = $(struct wlr_output        * ptrWlrOutput');
+                struct wlr_output_layout * output_layout = $(struct wlr_output_layout * ptrWlrOutputLayout');
+                struct wlr_renderer      * renderer      = $(struct wlr_renderer      * renderer');
+                struct wlr_surface       * surface       = $(struct wlr_surface       * ptrWlrSurface');
+                struct timespec          * time_spec     = $(struct timespec          * ptrTimeSpec);
+                int                        sx            = $(int                        sx');
+                int                        sy            = $(int                        sy');
+                double                     lx            = $(double                     lx');
+                double                     ly            = $(double                     ly');
+
+                //1. Get texture
+                struct wlr_texture *texture = wlr_surface_get_texture(surface);
+                if (texture == NULL) {
+                        return;
+                }
+                double ox = 0, oy = 0;
+
+                //2. Construct transform from surface->output
+                wlr_output_layout_output_coords(
+                                output_layout, output, &ox, &oy);
+                ox += lx + sx, oy += ly + sy;
+
+                struct wlr_box box = {
+                        .x = ox * output->scale,
+                        .y = oy * output->scale,
+                        .width = surface->current.width * output->scale,
+                        .height = surface->current.height * output->scale,
+                };
+
+                float matrix[9];
+                enum wl_output_transform transform =
+                        wlr_output_transform_invert(surface->current.transform);
+                wlr_matrix_project_box(matrix, &box, transform, 0,
+                        output->transform_matrix);
+
+                //3. Render
+                wlr_render_texture_with_matrix(renderer, texture, matrix, 1);
+
+                //4. Tell the client we're done rendering so it can start drawing the next frame
+                wlr_surface_send_frame_done(surface, time_spec); //time_spec references aren't used after this call, so we can safely delete the memory
+               } |]
+  free ptrTimeSpec
+  return ()
+
+-- TODO: Update the WlEvent types^ for today's work, etc. Including this one.
 outputFrame :: WlListener ()
 outputFrame = undefined
 

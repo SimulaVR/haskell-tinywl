@@ -26,6 +26,8 @@ import Graphics.Wayland.Signal
 
 import Data.Coerce
 
+import System.Clock
+
 
 -- |Many of these hold actual structs, but are opaque to Haskell without explicit Storable declarations.
 data C'WlDisplay
@@ -87,6 +89,7 @@ initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
   ,  (C.Struct "wlr_event_keyboard_key", [t|C'WlrEventKeyboardKey|])
   ,  (C.Struct "wlr_seat_pointer_state", [t|C'WlrSeatPointerState|])
   ,  (C.Struct "wlr_seat_client", [t|C'WlrSeatClient|])
+  ,  (C.Struct "timespec", [t|TimeSpec|])
   -- Omitted XKB Types: xkb_keysym_t, xkb_state, xkb_rule_names, xkb_context, xkb_keymap
 -- (C.TypeName "wl_shm_format_argb8888", [t|C'WlShmFormatArgb8888|])
 -- (C.TypeName "wl_keyboard_key_state", [t|C'WlKeyboardKeyState|])
