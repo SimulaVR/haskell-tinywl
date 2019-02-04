@@ -5,9 +5,11 @@ module TinyWL where
 
 import           Control.Lens hiding (Context)
 import           Control.Concurrent.STM.TVar
+import           Control.Exception
 import           Control.Monad
 import           Control.Monad.STM
 import           Data.Maybe
+import           Data.List
 
 import           Foreign
 import           Foreign.Ptr
@@ -43,6 +45,7 @@ import           Graphics.Wayland.WlRoots.Input.Keyboard
 import           Graphics.Wayland.WlRoots.Input.Pointer
 import           Graphics.Wayland.WlRoots.Cursor
 import           Graphics.Wayland.WlRoots.Input.Buttons
+import           Graphics.Wayland.WlRoots.Box
 import           System.Clock
 import           Control.Monad.Extra
 
@@ -76,10 +79,11 @@ data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
                                  , _tsRequestCursor :: WlListener ()
                                  , _tsKeyboards :: TVar [TinyWLKeyboard]
                                  , _tsCursorMode :: TVar (TinyWLCursorMode)
-                                 , _tsGrabbedView :: TinyWLView
+                                 , _tsGrabbedView :: TVar TinyWLView
                                  , _tsGrab :: TVar SurfaceLocalCoordinates -- The surface-local point at which a surface is grabbed.
-                                 , _tsGrabWidth :: Int
-                                 , _tsResizeEdges :: Int
+                                 , _tsGrabWidth :: TVar Int
+                                 , _tsGrabHeight :: TVar Int
+                                 , _tsResizeEdges :: TVar Int
                                  , _tsOutputLayout :: Ptr WlrOutputLayout
                                  , _tsOutputs :: TVar [TinyWLOutput]
                                  , _tsNewOutput :: WlListener ()
@@ -87,7 +91,7 @@ data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
 
 data TinyWLOutput = TinyWLOutput { _toServer :: TinyWLServer
                                 , _toWlrOutput :: Ptr WlrOutput
-                                , _toFrame :: WlListener ()
+                                , _toFrame :: WlListener WlrOutput
                                 }
 
 data TinyWLView = TinyWLView { _tvServer :: TinyWLServer
@@ -97,7 +101,7 @@ data TinyWLView = TinyWLView { _tvServer :: TinyWLServer
                              , _tvDestroy :: WlListener ()
                              , _tvRequestMove :: WlListener ()
                              , _tvRequestResize :: WlListener ()
-                             , _tvMapped :: Bool
+                             , _tvMapped :: TVar Bool
                              , _tvOutputLayoutCoordinates :: TVar OutputLayoutCoordinates -- Denotes top-left corner of view in OutputLayoutCoordinates
                              }
 
@@ -116,6 +120,7 @@ data RenderData = RenderData { _rdOutput :: Ptr WlrOutput
                              }
 
 makeLenses ''TinyWLServer
+makeLenses ''TinyWLOutput
 makeLenses ''TinyWLView
 makeLenses ''TinyWLKeyboard
 makeLenses ''RenderData
@@ -585,25 +590,182 @@ renderSurface  ptrWlrSurface surfaceDimension@(SurfaceDimension (sx, sy)) render
   free ptrTimeSpec
   return ()
 
--- TODO: Update the WlEvent types^ for today's work, etc. Including this one.
-outputFrame :: WlListener ()
-outputFrame = undefined
 
-serverNewOutput :: WlListener ()
-serverNewOutput = undefined
+-- | This is a helper function to generate typedef void
+-- |   (*wlr_surface_iterator_func_t)(struct wlr_surface *surface, int sx, int
+-- |   sy, void *data); used in calls to, i.e., wlr_xdg_surface_for_each_surface.
+-- | Rather than uses the void pointer to jam a RenderData into it, we pass a
+-- | RenderData into the first argument and close over it (otherwise we'd have to
+-- | implement a bunch of Storable instances).
+renderSurfaceIteratorClosure :: RenderData -> Ptr C'WlrSurface -> CInt -> CInt -> Ptr () -> IO ()
+renderSurfaceIteratorClosure renderData ptrWlrSurface' sx sy _ = do
+  let ptrWlrSurface = toC2HS ptrWlrSurface'
+  renderSurface ptrWlrSurface (SurfaceDimension ((fromIntegral sx), (fromIntegral sy))) renderData
 
-xdgSurfaceMap :: WlListener ()
-xdgSurfaceMap = undefined
+-- | This function is called every time an output is ready to display a frame.
+outputFrame :: TinyWLOutput -> WlListener WlrOutput
+outputFrame tinyWLOutput = WlListener $ \_ -> do
+  let ptrRenderer = (tinyWLOutput ^. toServer ^. tsRenderer)
+  now <- getTime Realtime
+  let wlrOutput = (tinyWLOutput ^. toWlrOutput)
+  maybeOutputCurrent <- makeOutputCurrent wlrOutput -- If this returns 0, then we shouldn't anything
+  case maybeOutputCurrent of
+       Nothing -> putStrLn "Unable to make output current!" -- If we can't make the output current, then do nothing
+       _       -> renderViews wlrOutput ptrRenderer now
 
-xdgSurfaceUnmap :: WlListener ()
-xdgSurfaceUnmap = undefined
+  where renderViews:: Ptr WlrOutput -> Ptr Renderer -> TimeSpec -> IO ()
+        renderViews wlrOutput ptrRenderer now = do
+            reverseViewList <- reverse <$> (atomically $ readTVar (tinyWLOutput ^. toServer ^. tsViews))
+            let reverseRendererList = fmap (\view -> RenderData { _rdOutput = wlrOutput
+                                                                , _rdRenderer = ptrRenderer
+                                                                , _rdView = view
+                                                                , _rdWhen = now }) reverseViewList
+            let purple      = Color 0.6 0.2 0.8 1
+            (width, height) <- effectiveResolution wlrOutput -- I believe this changes if you, i.e., rotate an output
+            let wlrOutput' = toInlineC wlrOutput
+            rendererBegin ptrRenderer (fromIntegral width) (fromIntegral height)
+            rendererClear ptrRenderer purple
+            mapM_ renderView reverseRendererList -- render each surface in reverse order so they appear properly overlapped
 
-xdgSurfaceDestroy :: WlListener ()
-xdgSurfaceDestroy = undefined
+            -- This is needed in case hardware cursors are not supported by your
+            -- hardware; it renders cursor on top of your views at the hardware
+            -- level; it won't do anything if hardware cursors are enabled.
+            [C.exp| void {wlr_output_render_software_cursors($(struct wlr_output * wlrOutput'), $(void * nullPtr))} |]
+            rendererEnd ptrRenderer
+            swapOutputBuffers wlrOutput Nothing Nothing -- Swapping buffers shows the actual frame on screen
+            return ()
 
+        -- This function assumes its called in between `rendererBegin` and `rendererEnd`
+        renderView :: RenderData -> IO ()
+        renderView renderData = do
+            -- This might not work if `wlr_xdg_surface_for_each_surface` somehow
+            -- needs the `Ptr ()` (which in the C implementation has the
+            -- render_data).
+            renderSurfaceIteratorT <- $(C.mkFunPtr [t| Ptr C'WlrSurface -> CInt -> CInt -> Ptr () -> IO () |]) $ renderSurfaceIteratorClosure renderData :: IO C'WlrSurfaceIteratorFuncT
+            let tinyWLView = renderData ^. rdView
+            let viewXdgSurface = toInlineC (tinyWLView ^. tvXdgSurface)
+            let isMapped = (tinyWLView ^. tvMapped)
+            case isMapped of
+                  False -> return () -- Don't render unmapped surfaces
+                  True -> [C.exp| void { wlr_xdg_surface_for_each_surface($(struct wlr_xdg_surface * viewXdgSurface), $(wlr_surface_iterator_func_t renderSurfaceIteratorT), $(void * nullPtr))}|] -- Calls renderSurfaceIteratorT for each surface among xdg_surface's toplevel and popups (hsroots doesn't provide).
+
+-- | This is an event handler raised by the backend when a new output (i.e.,
+-- | display or monitor) becomes available.
+serverNewOutput :: TinyWLServer -> WlListener WlrOutput
+serverNewOutput tinyWLServer = WlListener $ \ptrWlrOutput -> do
+  -- Sets the outputs (width, height, refresh rate) which depends on your hardware.
+  -- This is only necessary for some backends (i.e., DRM+KMS). Here we just pick
+  -- the first mode supported in the list retrieved.
+  setOutputModeAutomatically ptrWlrOutput
+
+  let tinyWLOutput = TinyWLOutput { _toServer = tinyWLServer
+                                  , _toWlrOutput = ptrWlrOutput
+                                  , _toFrame = (outputFrame tinyWLOutput)
+                                  }
+  let signal = outSignalFrame (getOutputSignals ptrWlrOutput)
+  addListener (tinyWLOutput ^. toFrame) signal
+
+  -- Add output to head of server's output list
+  outputsList  <- atomically $ readTVar (tinyWLServer ^. tsOutputs)
+  let outputsListNew = tinyWLOutput:outputsList
+  atomically $ writeTVar (tinyWLServer ^. tsOutputs) outputsListNew
+
+  let ptrOutputLayout = tinyWLServer ^. tsOutputLayout
+
+  -- This function automatically adds output to the layout in the left-to-right
+  -- order in which they appear. We might have to adjust this in Simula if we
+  -- are to treat each surface sprite as as its own output.
+  addOutputAuto ptrOutputLayout ptrWlrOutput
+
+  -- Adds the wl_output global to the display, which Wayland clients can use to
+  -- find out information about this output (such as DPI, scale factor,
+  -- manufacturerer, etc).
+  createOutputGlobal ptrWlrOutput
+
+
+  where  setOutputModeAutomatically :: Ptr WlrOutput -> IO ()
+         setOutputModeAutomatically ptrWlrOutput = do
+         hasModes' <- hasModes ptrWlrOutput
+         when hasModes' $ do modes <- getModes ptrWlrOutput
+                             let headMode = head modes -- We might want to reverse this list first to mimic C implementation
+                             setOutputMode headMode ptrWlrOutput
+                             return ()
+
+-- | Called when the surface is "mapped" (i.e., "ready to display
+-- | on-screen").
+xdgSurfaceMap :: TinyWLView -> WlListener ()
+xdgSurfaceMap tinyWLView = WlListener $ \_ -> do
+  maybeSurface <- xdgSurfaceGetSurface (tinyWLView ^. tvXdgSurface)
+
+  -- Set the XDG surface as mapped
+  atomically $ writeTVar (tinyWLView ^. tvMapped) True
+
+  -- Then give it keyboard focus
+  case maybeSurface of
+    Nothing -> return ()
+    Just surface -> focusView tinyWLView surface
+  return ()
+
+-- | Called when the surface is "unmapped", and should no longer be shown.
+xdgSurfaceUnmap :: TinyWLView -> WlListener ()
+xdgSurfaceUnmap tinyWLView = WlListener $ \_ -> do
+  atomically $ writeTVar (tinyWLView ^. tvMapped) False
+
+-- | Called when the surface is destroyed, and should never be shown again.
+xdgSurfaceDestroy :: TinyWLView -> WlListener ()
+xdgSurfaceDestroy tinyWLView = WlListener $ \_ -> do
+  viewList <- atomically $ readTVar (tinyWLView ^. tvServer ^. tsViews)
+  let cleansedViewList = removeTinyWLViewFromList tinyWLView viewList
+
+  -- Remove the view from the server's list of views
+  atomically $ writeTVar (tinyWLView ^. tvServer ^. tsViews) cleansedViewList 
+
+-- | This is the function called when a user starts to move or resize a surface.
+-- | This ultimately causes the compositor to stop propagating pointer events to
+-- | clients and instead consume them itself to move/resize windows. Locally, it
+-- | mutates the server to signal its in the middle of a grab/resize.
 beginInteractive :: TinyWLView -> TinyWLCursorMode -> Int -> IO ()
-beginInteractive = undefined
--- let seat = (_tsSeat server)
+beginInteractive tinyWLView cursorMode edges = do
+  let tinyWLServer = tinyWLView ^. tvServer
+  let seat' = toInlineC (tinyWLServer ^. tsSeat)
+  lastFocusedSurface' <- [C.exp| struct wlr_surface * { $(struct wlr_seat * seat')->pointer_state.focused_surface } |] -- hsroots doesn't provide access to this data structure AFAIK
+  let lastFocusedSurface = toC2HS lastFocusedSurface'
+  let viewXdgSurface = (tinyWLView ^. tvXdgSurface)
+  maybeViewSurface <- xdgSurfaceGetSurface viewXdgSurface
+
+  case maybeViewSurface of
+       Nothing -> return ()
+       (Just viewSurface) -> do let  viewIsntFocused = (lastFocusedSurface /= viewSurface)
+                                case viewIsntFocused of
+                                    True -> return () -- Ignore unfocused clients that try to resize/move surfaces
+                                    False -> mutateServer tinyWLServer viewXdgSurface viewSurface
+
+  where mutateServer tinyWLServer viewXdgSurface viewSurface = do
+          let cursor = (tinyWLServer ^. tsCursor)
+          cursorLX <- getCursorX cursor
+          cursorLY <- getCursorY cursor
+          let cursorPosition = OutputLayoutCoordinates (cursorLX, cursorLY)
+          viewPosition@(OutputLayoutCoordinates (viewLX, viewLY)) <- atomically $ readTVar (tinyWLView ^. tvOutputLayoutCoordinates)
+
+          -- I do *not* conceptually understand what the point of this wlr_box is.
+          geoBox <- getGeometry viewXdgSurface -- I believe this just makes a wlr_box with the same geometry as the viewXdgSurface
+          let geoBoxX = (boxX geoBox) -- Source makes it look like this is just the width of the surface?
+          let geoBoxY = (boxY geoBox) -- "
+          let geoBoxWidth = (boxWidth geoBox)
+          let geoBoxHeight = (boxHeight geoBox)
+
+          -- Mutate server state to reflect that we're in the middle of a grab
+          atomically $ writeTVar (tinyWLServer ^. tsGrabbedView) tinyWLView
+          atomically $ writeTVar (tinyWLServer ^. tsCursorMode) cursorMode
+
+          case cursorMode of
+              TinyWLCursorMove -> atomically $ writeTVar (tinyWLServer ^. tsGrab) (SurfaceLocalCoordinates ( (cursorLX - viewLX) , (cursorLY - viewLY) ))   -- Mutate the grab coordinates to their natural surface-local position
+              _                -> atomically $ writeTVar (tinyWLServer ^. tsGrab) (SurfaceLocalCoordinates ( (cursorLX + (fromIntegral geoBoxX)) , (cursorLY + (fromIntegral geoBoxY)) )) -- Totally unclear what this is doing; why not do as above??
+
+          -- More server mutation
+          atomically $ writeTVar (tinyWLServer ^. tsGrabWidth) geoBoxWidth
+          atomically $ writeTVar (tinyWLServer ^. tsGrabHeight) geoBoxHeight
+          atomically $ writeTVar (tinyWLServer ^. tsResizeEdges) edges
 
 xdgToplevelRequestMove :: WlListener ()
 xdgToplevelRequestMove = undefined

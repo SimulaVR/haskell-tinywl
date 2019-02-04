@@ -61,6 +61,8 @@ data C'WlListener -- HsRoots treats this type subtly; see Marshal.hs and Signal.
 -- |typedef void(* wl_notify_func_t) (struct wl_listener *listener, void *data)
 type C'WlNotifyFuncT = FunPtr (Ptr C'WlListener -> Ptr () -> IO ())
 
+type C'WlrSurfaceIteratorFuncT = FunPtr (Ptr C'WlrSurface -> CInt -> CInt -> Ptr () -> IO ())
+
 -- |All inline-C types are kept in an explicit marshalling table.
 -- |Note we must not use C++ in this project as wlroots is incompatible with C++ compilers (see wlr_renderer.h use of [static ..]).
 initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
@@ -90,6 +92,7 @@ initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
   ,  (C.Struct "wlr_seat_pointer_state", [t|C'WlrSeatPointerState|])
   ,  (C.Struct "wlr_seat_client", [t|C'WlrSeatClient|])
   ,  (C.Struct "timespec", [t|TimeSpec|])
+  ,  (C.TypeName "wlr_surface_iterator_func_t", [t|C'WlrSurfaceIteratorFuncT|])
   -- Omitted XKB Types: xkb_keysym_t, xkb_state, xkb_rule_names, xkb_context, xkb_keymap
 -- (C.TypeName "wl_shm_format_argb8888", [t|C'WlShmFormatArgb8888|])
 -- (C.TypeName "wl_keyboard_key_state", [t|C'WlKeyboardKeyState|])
@@ -117,6 +120,7 @@ initializeTinyWLCtxAndIncludes = do
   C.include "<wlr/types/wlr_seat.h>"
   C.include "<wlr/types/wlr_xcursor_manager.h>"
   C.include "<wlr/types/wlr_xdg_shell.h>"
+  C.include "<wlr/types/wlr_surface.h>"
   C.include "<wlr/util/log.h>"
   C.include "<xkbcommon/xkbcommon.h>"
   C.include "<assert.h>"
