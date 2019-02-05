@@ -59,7 +59,7 @@ main = do setLogPrio Debug -- Silent, Error, Info, Debug
 
           emptyViews <- atomically $ (newTVar []) :: IO (TVar [TinyWLView])
           emptyKeyboards <- atomically $ (newTVar []) :: IO (TVar [TinyWLKeyboard])
-          emptyCursorMode <- atomically $ (newTVar undefined) :: IO (TVar (TinyWLCursorMode))
+          cursorMode <- atomically $ (newTVar TinyWLCursorPassthrough) :: IO (TVar (TinyWLCursorMode))
           emptyGrabbedView <- atomically $ (newTVar undefined) :: IO (TVar (TinyWLView))
           emptyGrab <- atomically $ (newTVar undefined) :: IO (TVar (SurfaceLocalCoordinates))
           emptyGrabWidth <- atomically $ (newTVar undefined) :: IO (TVar (Int))
@@ -91,7 +91,7 @@ main = do setLogPrio Debug -- Silent, Error, Info, Debug
                                               , _tsNewInput             = (serverNewInput tinyWLServer)             :: WlListener InputDevice
                                               , _tsRequestCursor        = (seatRequestCursor tinyWLServer)          :: WlListener SetCursorEvent
                                               , _tsKeyboards            = emptyKeyboards                            :: TVar [TinyWLKeyboard]
-                                              , _tsCursorMode           = emptyCursorMode                           :: TVar (TinyWLCursorMode)
+                                              , _tsCursorMode           = cursorMode
                                               , _tsGrabbedView          = emptyGrabbedView                          :: TVar TinyWLView
                                               , _tsGrab                 = emptyGrab                                 :: TVar SurfaceLocalCoordinates -- The surface-local point at which a surface is grabbed.
                                               , _tsGrabWidth            = emptyGrabWidth                            :: TVar Int

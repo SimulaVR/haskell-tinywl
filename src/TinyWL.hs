@@ -310,8 +310,8 @@ serverNewInput tinyWLServer = WlListener $ \device ->
      -- Note that Graphics.Wayland.Internal.SpliceServerTypes code generates the following:
      --   newtype SeatCapability = SeatCapability GHC.Types.Int
      -- Now see: https://github.com/swaywm/hsroots/blob/f9b07af96dff9058a3aac59eba5a608a91801c0a/src/Graphics/Wayland/WlRoots/Input.hsc#L48
-     let mouseCapability = SeatCapability (deviceTypeToInt (DevicePointer undefined))
-     let keyboardCapability = SeatCapability (deviceTypeToInt (DeviceKeyboard undefined))
+     let mouseCapability = SeatCapability (deviceTypeToInt (DevicePointer nullPtr))
+     let keyboardCapability = SeatCapability (deviceTypeToInt (DeviceKeyboard nullPtr))
      let mouseCapabilities = [mouseCapability] :: [SeatCapability]
      let allCapabilities = [mouseCapability, keyboardCapability] :: [SeatCapability]
      keyboardList <- atomically $ readTVar (_tsKeyboards tinyWLServer)
