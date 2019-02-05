@@ -1,7 +1,7 @@
 extra-deps:
 - data-flags-0.0.3.4
 - git: https://github.com/SimulaVR/hsroots
-  commit: 92adff771783f4b4f36754d26109463daca8c2e6
+  commit: ff0d7eabcfa8859bd101bad00da2dc35203f12dc
 - git: https://github.com/SimulaVR/hayland
   commit: 7bb7d3dbe97bf5ec38697d87da31f3e00f992494
 - git: https://github.com/Ongy/haskell-xkbcommon.git

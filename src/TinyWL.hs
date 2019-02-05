@@ -66,17 +66,17 @@ data TinyWLCursorMode = TinyWLCursorPassthrough | TinyWLCursorMove |  TinyWLCurs
 data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
                                  , _tsRenderer :: Ptr Renderer
                                  , _tsXdgShell :: Ptr WlrXdgShell
-                                 , _tsNewXdgSurface :: WlListener ()
+                                 , _tsNewXdgSurface :: WlListener WlrXdgSurface
                                  , _tsViews :: TVar [TinyWLView]
                                  , _tsCursor :: Ptr WlrCursor
                                  , _tsCursorManager :: Ptr WlrXCursorManager
-                                 , _tsCursorMotion :: WlListener ()
-                                 , _tsCursorMotionAbsolute :: WlListener ()
-                                 , _tsCursorButton :: WlListener ()
-                                 , _tsCursorAxis :: WlListener ()
+                                 , _tsCursorMotion :: WlListener WlrEventPointerMotion
+                                 , _tsCursorMotionAbsolute :: WlListener WlrEventPointerAbsMotion
+                                 , _tsCursorButton :: WlListener WlrEventPointerButton
+                                 , _tsCursorAxis :: WlListener WlrEventPointerAxis
                                  , _tsSeat :: Ptr WlrSeat
-                                 , _tsNewInput :: WlListener ()
-                                 , _tsRequestCursor :: WlListener ()
+                                 , _tsNewInput :: WlListener InputDevice
+                                 , _tsRequestCursor :: WlListener SetCursorEvent
                                  , _tsKeyboards :: TVar [TinyWLKeyboard]
                                  , _tsCursorMode :: TVar (TinyWLCursorMode)
                                  , _tsGrabbedView :: TVar TinyWLView
@@ -86,21 +86,21 @@ data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
                                  , _tsResizeEdges :: TVar Int
                                  , _tsOutputLayout :: Ptr WlrOutputLayout
                                  , _tsOutputs :: TVar [TinyWLOutput]
-                                 , _tsNewOutput :: WlListener ()
+                                 , _tsNewOutput :: WlListener WlrOutput
                                  }
 
 data TinyWLOutput = TinyWLOutput { _toServer :: TinyWLServer
-                                , _toWlrOutput :: Ptr WlrOutput
-                                , _toFrame :: WlListener WlrOutput
-                                }
+                                 , _toWlrOutput :: Ptr WlrOutput
+                                 , _toFrame :: WlListener WlrOutput
+                                 }
 
 data TinyWLView = TinyWLView { _tvServer :: TinyWLServer
                              , _tvXdgSurface :: Ptr WlrXdgSurface
-                             , _tvMap :: WlListener ()
-                             , _tvUnmap :: WlListener ()
-                             , _tvDestroy :: WlListener ()
-                             , _tvRequestMove :: WlListener ()
-                             , _tvRequestResize :: WlListener ()
+                             , _tvMap :: WlListener WlrXdgSurface
+                             , _tvUnmap :: WlListener WlrXdgSurface
+                             , _tvDestroy :: WlListener WlrXdgSurface
+                             , _tvRequestMove :: WlListener MoveEvent
+                             , _tvRequestResize :: WlListener ResizeEvent
                              , _tvMapped :: TVar Bool
                              , _tvOutputLayoutCoordinates :: TVar OutputLayoutCoordinates -- Denotes top-left corner of view in OutputLayoutCoordinates
                              }
@@ -382,7 +382,8 @@ desktopViewAt  tinyWLServer outputLayoutCoordinates = do
 -- | NOTE: The second argument isn't used in the C implementation.
 processCursorMove :: TinyWLServer -> TimeSpec -> IO ()
 processCursorMove tinyWLServer _ = do
-   grabbedViewTopLeft@(OutputLayoutCoordinates (grabbedViewLX, grabbedViewLY)) <- atomically $ readTVar (_tvOutputLayoutCoordinates (_tsGrabbedView tinyWLServer))
+   grabbedView <- atomically $ readTVar (tinyWLServer ^. tsGrabbedView)
+   grabbedViewTopLeft@(OutputLayoutCoordinates (grabbedViewLX, grabbedViewLY)) <- atomically $ readTVar (grabbedView ^. tvOutputLayoutCoordinates)
    surfaceGrabPoint@(SurfaceLocalCoordinates (surfaceGrabPointSX, surfaceGrabPointSY)) <- atomically $ readTVar (_tsGrab tinyWLServer)
 
    let cursor = (_tsCursor tinyWLServer)
@@ -390,7 +391,10 @@ processCursorMove tinyWLServer _ = do
    cursorLY <- getCursorY cursor
    let cursorPosition = OutputLayoutCoordinates (cursorLX, cursorLY)
    let newGrabbedViewTopLeft = OutputLayoutCoordinates (cursorLX - surfaceGrabPointSX, cursorLY - surfaceGrabPointSY)
-   atomically $ writeTVar (_tvOutputLayoutCoordinates (_tsGrabbedView tinyWLServer)) newGrabbedViewTopLeft
+
+   -- Nested TVars require us to mutate twice :(
+   atomically $ writeTVar (grabbedView ^. tvOutputLayoutCoordinates) newGrabbedViewTopLeft
+   atomically $ writeTVar (tinyWLServer ^. tsGrabbedView) grabbedView
 
 -- | Since VR requires specialized treatment of surface resizing, I'm waiting to
 -- | implement this until later.
@@ -644,7 +648,7 @@ outputFrame tinyWLOutput = WlListener $ \_ -> do
             renderSurfaceIteratorT <- $(C.mkFunPtr [t| Ptr C'WlrSurface -> CInt -> CInt -> Ptr () -> IO () |]) $ renderSurfaceIteratorClosure renderData :: IO C'WlrSurfaceIteratorFuncT
             let tinyWLView = renderData ^. rdView
             let viewXdgSurface = toInlineC (tinyWLView ^. tvXdgSurface)
-            let isMapped = (tinyWLView ^. tvMapped)
+            isMapped <- atomically $ readTVar (tinyWLView ^. tvMapped)
             case isMapped of
                   False -> return () -- Don't render unmapped surfaces
                   True -> [C.exp| void { wlr_xdg_surface_for_each_surface($(struct wlr_xdg_surface * viewXdgSurface), $(wlr_surface_iterator_func_t renderSurfaceIteratorT), $(void * nullPtr))}|] -- Calls renderSurfaceIteratorT for each surface among xdg_surface's toplevel and popups (hsroots doesn't provide).
@@ -685,15 +689,15 @@ serverNewOutput tinyWLServer = WlListener $ \ptrWlrOutput -> do
 
   where  setOutputModeAutomatically :: Ptr WlrOutput -> IO ()
          setOutputModeAutomatically ptrWlrOutput = do
-         hasModes' <- hasModes ptrWlrOutput
-         when hasModes' $ do modes <- getModes ptrWlrOutput
-                             let headMode = head modes -- We might want to reverse this list first to mimic C implementation
-                             setOutputMode headMode ptrWlrOutput
-                             return ()
+          hasModes' <- hasModes ptrWlrOutput
+          when hasModes' $ do modes <- getModes ptrWlrOutput
+                              let headMode = head modes -- We might want to reverse this list first to mimic C implementation
+                              setOutputMode headMode ptrWlrOutput
+                              return ()
 
 -- | Called when the surface is "mapped" (i.e., "ready to display
 -- | on-screen").
-xdgSurfaceMap :: TinyWLView -> WlListener ()
+xdgSurfaceMap :: TinyWLView -> WlListener WlrXdgSurface
 xdgSurfaceMap tinyWLView = WlListener $ \_ -> do
   maybeSurface <- xdgSurfaceGetSurface (tinyWLView ^. tvXdgSurface)
 
@@ -707,12 +711,12 @@ xdgSurfaceMap tinyWLView = WlListener $ \_ -> do
   return ()
 
 -- | Called when the surface is "unmapped", and should no longer be shown.
-xdgSurfaceUnmap :: TinyWLView -> WlListener ()
+xdgSurfaceUnmap :: TinyWLView -> WlListener WlrXdgSurface
 xdgSurfaceUnmap tinyWLView = WlListener $ \_ -> do
   atomically $ writeTVar (tinyWLView ^. tvMapped) False
 
 -- | Called when the surface is destroyed, and should never be shown again.
-xdgSurfaceDestroy :: TinyWLView -> WlListener ()
+xdgSurfaceDestroy :: TinyWLView -> WlListener WlrXdgSurface
 xdgSurfaceDestroy tinyWLView = WlListener $ \_ -> do
   viewList <- atomically $ readTVar (tinyWLView ^. tvServer ^. tsViews)
   let cleansedViewList = removeTinyWLViewFromList tinyWLView viewList
@@ -767,11 +771,73 @@ beginInteractive tinyWLView cursorMode edges = do
           atomically $ writeTVar (tinyWLServer ^. tsGrabHeight) geoBoxHeight
           atomically $ writeTVar (tinyWLServer ^. tsResizeEdges) edges
 
-xdgToplevelRequestMove :: WlListener ()
-xdgToplevelRequestMove = undefined
+-- | Raised when a client requests interactive move (typically because the user
+-- | clicked on their client-side decorations).
+xdgToplevelRequestMove :: TinyWLView -> WlListener MoveEvent
+xdgToplevelRequestMove tinyWLView = WlListener $ \_ -> do
+  beginInteractive tinyWLView TinyWLCursorMove 0
 
-xdgToplevelRequestResize :: WlListener ()
-xdgToplevelRequestResize = undefined
+-- | Raised when a client requests interactive resize (typically because the user
+-- | clicked on their client-side decorations).
+xdgToplevelRequestResize :: TinyWLView -> WlListener ResizeEvent
+xdgToplevelRequestResize tinyWLView = WlListener $ \ptrResizeEvent -> do
+  resizeEvent <- peek ptrResizeEvent
+  -- let surface = resizeEvtSurface resizeEvent :: Ptr WlrXdgSurface
+  -- let seat= resizeEvtSeat    resizeEvent     :: Ptr WlrSeatClient
+  -- let serial = resizeEvtSerial  resizeEvent  :: Word32
+  let edges = resizeEvtEdges   resizeEvent   :: Word32
+  beginInteractive tinyWLView TinyWLCursorResize (fromIntegral edges)
 
-serverNewXdgSurface :: WlListener ()
-serverNewXdgSurface = undefined
+-- | This event is raised when wlr_xdg_shell receives a new xdg surface from a
+-- | client, either a toplevel (application window) or popup.
+serverNewXdgSurface :: TinyWLServer -> WlListener WlrXdgSurface
+serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
+  maybeTopLevel <- getXdgToplevel ptrWlrXdgSurface
+  case maybeTopLevel of
+       Nothing         -> return () -- If the surface is, i.e., a popup or has no XDG "role", then we don't do anything.
+       (Just topLevel) -> createServerView ptrWlrXdgSurface topLevel
+  where
+        -- createServerView creates a new TinyWLView, connects its WlListeners
+        -- to the proper signals, and adds it to the front of the server's view
+        -- list
+        createServerView :: Ptr WlrXdgSurface -> Ptr WlrXdgToplevel -> IO ()
+        createServerView ptrWlrXdgSurface topLevel = do
+          -- We use empty TVars to jam into some of the TinyWLView's fields
+          emptyBool <- atomically $ (newTVar undefined) :: IO (TVar Bool)
+          emptyOLC <- atomically $ newTVar undefined :: IO (TVar OutputLayoutCoordinates)
+
+          let tinyWLView = TinyWLView { _tvServer = tinyWLServer :: TinyWLServer
+                                      , _tvXdgSurface              = ptrWlrXdgSurface                      :: Ptr WlrXdgSurface
+                                      , _tvMap                     = (xdgSurfaceMap tinyWLView)            :: WlListener WlrXdgSurface
+                                      , _tvUnmap                   = (xdgSurfaceUnmap tinyWLView)          :: WlListener WlrXdgSurface
+                                      , _tvDestroy                 = (xdgSurfaceDestroy tinyWLView)        :: WlListener WlrXdgSurface
+                                      , _tvRequestMove             = (xdgToplevelRequestMove tinyWLView )  :: WlListener MoveEvent
+                                      , _tvRequestResize           = (xdgToplevelRequestResize tinyWLView) :: WlListener ResizeEvent
+                                      , _tvMapped                  = emptyBool                             :: TVar Bool
+                                      , _tvOutputLayoutCoordinates = emptyOLC                              :: TVar OutputLayoutCoordinates
+                                      }
+
+          -- Signals are divided into XdgSurfaceEvents and XdgTopLevelEvents
+          let wlrXdgSurfaceEvents = getXdgSurfaceEvents ptrWlrXdgSurface
+          let eventToplevelWlrXdgToplevelEvents = getXdgToplevelEvents topLevel
+
+          -- We omit "timeout", "popup" signals
+          let signalDestroy = xdgSurfaceEvtDestroy wlrXdgSurfaceEvents :: Ptr (WlSignal WlrXdgSurface)
+          let signalMap = xdgSurfaceEvtMap wlrXdgSurfaceEvents :: Ptr (WlSignal WlrXdgSurface)
+          let signalUnmap = xdgSurfaceEvtUnmap wlrXdgSurfaceEvents :: Ptr (WlSignal WlrXdgSurface)
+
+          -- We omit "maximize", "fullscreen", "minimize", and "menu" signals
+          let signalToplevelMove                = xdgToplevelEvtMove  eventToplevelWlrXdgToplevelEvents :: Ptr (WlSignal MoveEvent)
+          let signalToplevelResize              = xdgToplevelEvtResize  eventToplevelWlrXdgToplevelEvents :: Ptr (WlSignal ResizeEvent)
+
+          addListener (tinyWLView ^. tvMap) signalMap                      -- xdg_surface event
+          addListener (tinyWLView ^. tvUnmap) signalUnmap                  -- xdg_surface event
+          addListener (tinyWLView ^. tvDestroy) signalDestroy              -- xdg_surface event
+          addListener (tinyWLView ^. tvRequestMove) signalToplevelMove     -- toplevel event
+          addListener (tinyWLView ^. tvRequestResize) signalToplevelResize -- toplevel event
+
+          -- We finally add/mutate the view to the head of our server's list
+          -- (which is consistent with it being the "focused" view)
+          serverViews <- atomically $ readTVar (tinyWLServer ^. tsViews)
+          let serverViews' = [tinyWLView] ++ serverViews
+          atomically $ writeTVar (tinyWLServer ^. tsViews) serverViews' 
