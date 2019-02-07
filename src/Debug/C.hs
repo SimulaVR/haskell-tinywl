@@ -55,6 +55,7 @@ data C'WlrEventKeyboardKey
 data C'WlrSeatPointerState
 data C'WlrSeatClient
   
+data C'WlSignal
 data C'WlListener -- HsRoots treats this type subtly; see Marshal.hs and Signal.hsc in HsRoots
 
 -- |Here we enrich C'WlNotifyFuncT with some inner structure. Note that in C:
@@ -91,6 +92,7 @@ initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
   ,  (C.Struct "wlr_event_keyboard_key", [t|C'WlrEventKeyboardKey|])
   ,  (C.Struct "wlr_seat_pointer_state", [t|C'WlrSeatPointerState|])
   ,  (C.Struct "wlr_seat_client", [t|C'WlrSeatClient|])
+  ,  (C.Struct "wlr_xdg_shell", [t|C'WlrXdgShell|])
   ,  (C.Struct "timespec", [t|TimeSpec|])
   ,  (C.TypeName "wlr_surface_iterator_func_t", [t|C'WlrSurfaceIteratorFuncT|])
   -- Omitted XKB Types: xkb_keysym_t, xkb_state, xkb_rule_names, xkb_context, xkb_keymap

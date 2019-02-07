@@ -63,30 +63,30 @@ data SurfaceDimension = SurfaceDimension (Int, Int)
 
 data TinyWLCursorMode = TinyWLCursorPassthrough | TinyWLCursorMove |  TinyWLCursorResize
 
-data TinyWLServer = TinyWLServer { _tsBackend :: Ptr Backend
-                                 , _tsRenderer :: Ptr Renderer
-                                 , _tsXdgShell :: Ptr WlrXdgShell
-                                 , _tsNewXdgSurface :: WlListener WlrXdgSurface
-                                 , _tsViews :: TVar [TinyWLView]
-                                 , _tsCursor :: Ptr WlrCursor
-                                 , _tsCursorManager :: Ptr WlrXCursorManager
-                                 , _tsCursorMotion :: WlListener WlrEventPointerMotion
+data TinyWLServer = TinyWLServer { _tsBackend              :: Ptr Backend
+                                 , _tsRenderer             :: Ptr Renderer
+                                 , _tsXdgShell             :: Ptr WlrXdgShell
+                                 , _tsNewXdgSurface        :: WlListener WlrXdgSurface
+                                 , _tsViews                :: TVar [TinyWLView]
+                                 , _tsCursor               :: Ptr WlrCursor
+                                 , _tsCursorManager        :: Ptr WlrXCursorManager
+                                 , _tsCursorMotion         :: WlListener WlrEventPointerMotion
                                  , _tsCursorMotionAbsolute :: WlListener WlrEventPointerAbsMotion
-                                 , _tsCursorButton :: WlListener WlrEventPointerButton
-                                 , _tsCursorAxis :: WlListener WlrEventPointerAxis
-                                 , _tsSeat :: Ptr WlrSeat
-                                 , _tsNewInput :: WlListener InputDevice
-                                 , _tsRequestCursor :: WlListener SetCursorEvent
-                                 , _tsKeyboards :: TVar [TinyWLKeyboard]
-                                 , _tsCursorMode :: TVar (TinyWLCursorMode)
-                                 , _tsGrabbedView :: TVar TinyWLView
-                                 , _tsGrab :: TVar SurfaceLocalCoordinates -- The surface-local point at which a surface is grabbed.
-                                 , _tsGrabWidth :: TVar Int
-                                 , _tsGrabHeight :: TVar Int
-                                 , _tsResizeEdges :: TVar Int
-                                 , _tsOutputLayout :: Ptr WlrOutputLayout
-                                 , _tsOutputs :: TVar [TinyWLOutput]
-                                 , _tsNewOutput :: WlListener WlrOutput
+                                 , _tsCursorButton         :: WlListener WlrEventPointerButton
+                                 , _tsCursorAxis           :: WlListener WlrEventPointerAxis
+                                 , _tsSeat                 :: Ptr WlrSeat
+                                 , _tsNewInput             :: WlListener InputDevice
+                                 , _tsRequestCursor        :: WlListener SetCursorEvent
+                                 , _tsKeyboards            :: TVar [TinyWLKeyboard]
+                                 , _tsCursorMode           :: TVar TinyWLCursorMode
+                                 , _tsGrabbedView          :: TVar (Maybe TinyWLView)
+                                 , _tsGrab                 :: TVar (Maybe SurfaceLocalCoordinates) -- The surface-local point at which a surface is grabbed.
+                                 , _tsGrabWidth            :: TVar (Maybe Int)
+                                 , _tsGrabHeight           :: TVar (Maybe Int)
+                                 , _tsResizeEdges          :: TVar (Maybe Int)
+                                 , _tsOutputLayout         :: Ptr WlrOutputLayout
+                                 , _tsOutputs              :: TVar [TinyWLOutput]
+                                 , _tsNewOutput            :: WlListener WlrOutput
                                  }
 
 data TinyWLOutput = TinyWLOutput { _toServer :: TinyWLServer
@@ -160,7 +160,6 @@ removeTinyWLViewFromList tinyWLView list = filter (not . isSameView tinyWLView) 
 -- (which seems redundant) to mirror the C implementation.
 focusView :: TinyWLView -> Ptr WlrSurface -> IO ()
 focusView tinyWLView ptrWlrSurface = do
-  putStrLn "focusView"
   let ptrWlrSeat =_tsSeat (_tvServer tinyWLView)
   prevSurface <- getKeyboardFocus (getKeyboardState ptrWlrSeat)
   when (ptrWlrSurface /= prevSurface) $ do -- If we're already focused on this view/surface, then this function doesn't do anything.
@@ -196,8 +195,7 @@ focusView tinyWLView ptrWlrSurface = do
 -- | the modifier keys to the client.
 keyboardHandleModifiers :: TinyWLKeyboard -> WlListener ()
 keyboardHandleModifiers tinyWLKeyboard = WlListener $ \ptrTinyWlKeyboard -> -- We're getting the same argument twice because this pointer scares me (don't understand where it's coming from)
-  do putStrLn "keyboardHandleModifiers"
-     let ptrWlrSeat     = (_tsSeat (_tkServer tinyWLKeyboard))
+  do let ptrWlrSeat     = (_tsSeat (_tkServer tinyWLKeyboard))
      let ptrInputDevice = (_tkDevice tinyWLKeyboard)
 
      seatSetKeyboard ptrWlrSeat ptrInputDevice -- Converts ptrInputDevice towlr_keyboard and makes it the active keyboard for the seat
@@ -224,8 +222,7 @@ handleKeybinding _ _ = do putStrLn "haskell-tinywl doesn't implement compositor-
 -- | active one in the wayland seat and (ii) notifies the client about the keypress.
 keyboardHandleKey :: TinyWLKeyboard -> WlListener EventKey
 keyboardHandleKey tinyWLKeyboard = WlListener $ \ptrEventKey ->
-  do putStrLn "keyboardHandleKey"
-     event               <- (peek ptrEventKey) -- EventKey ∈ Storable
+  do event               <- (peek ptrEventKey) -- EventKey ∈ Storable
      let server          =  (_tkServer tinyWLKeyboard)
      let seat            =  (_tsSeat server)
      let device          =  (_tkDevice tinyWLKeyboard)
@@ -248,7 +245,6 @@ keyboardHandleKey tinyWLKeyboard = WlListener $ \ptrEventKey ->
 -- | list.
 serverNewKeyboard :: TinyWLServer -> Ptr InputDevice -> IO ()
 serverNewKeyboard server device = do
-  putStrLn "serverNewKeyboard"
   let tinyWLKeyboard = TinyWLKeyboard { _tkServer    = server                                   :: TinyWLServer
                                       , _tkDevice    = device                                   :: Ptr InputDevice
                                       , _tkModifiers = (keyboardHandleModifiers tinyWLKeyboard) :: WlListener ()
@@ -294,10 +290,8 @@ serverNewKeyboard server device = do
 -- | Here we just wrap a call to wlr_cursor_attach_input_device. The reason this function is so simple is that we all pointer handling is proxied through wlr_cursor by default. VR inputs will likely involve studying wlr_cursor in detail to see how it handles motion events.
 serverNewPointer :: TinyWLServer -> Ptr InputDevice -> IO ()
 serverNewPointer tinyWLServer device = do
-  putStrLn "serverNewPointer"
   let cursor = (_tsCursor tinyWLServer)
   attachInputDevice cursor device
-
 -- | This wl_listener is called when TinyWL gets a new wlr_input_device. We (i)
 -- | inspect the wlr_input_device to see whether it is a keyboard or a pointer,
 -- | passing it to serverNew* accordingly; (ii) set the wlr_seat's "capabilities" as
@@ -305,8 +299,7 @@ serverNewPointer tinyWLServer device = do
 -- | keyboard list is empty or not.
 serverNewInput :: TinyWLServer -> WlListener InputDevice
 serverNewInput tinyWLServer = WlListener $ \device ->
-  do putStrLn "serverNewInput"
-     deviceType <- inputDeviceType device
+  do deviceType <- inputDeviceType device
      let seat = (_tsSeat tinyWLServer)
      return ()
      case deviceType of
@@ -331,8 +324,7 @@ serverNewInput tinyWLServer = WlListener $ \device ->
 -- | is called.
 seatRequestCursor :: TinyWLServer -> WlListener SetCursorEvent
 seatRequestCursor tinyWLServer = WlListener $ \ptrSetCursorEvent ->
-  do putStrLn "seatRequestCursor"
-     setCursorEvent <- peek ptrSetCursorEvent -- [[file:~/hsroots/src/Graphics/Wayland/WlRoots/Seat.hsc::instance%20Storable%20SetCursorEvent%20where]] 
+  do setCursorEvent <- peek ptrSetCursorEvent -- [[file:~/hsroots/src/Graphics/Wayland/WlRoots/Seat.hsc::instance%20Storable%20SetCursorEvent%20where]] 
      let clientRequester = (toInlineC $ unSeatClient $ seatCursorSurfaceClient setCursorEvent) :: Ptr C'WlrSeatClient
      let seat = toInlineC (_tsSeat tinyWLServer)
      focusedClient <- [C.exp| struct wlr_seat_client * { $(struct wlr_seat * seat)->pointer_state.focused_client } |] -- hsroots doesn't provide access to this data structure AFAIK
@@ -351,7 +343,6 @@ seatRequestCursor tinyWLServer = WlListener $ \ptrSetCursorEvent ->
 -- | corresponding subsurface coordinates relative to the subsurface.
 viewAt :: TinyWLView -> OutputLayoutCoordinates -> IO (Maybe (Ptr WlrSurface, SubSurfaceLocalCoordinates))
 viewAt tinyWLView (OutputLayoutCoordinates (lx, ly)) = do                                                                     -- (lx, ly) denote the cursor's position in output layout space
-  putStrLn "viewAt"
   OutputLayoutCoordinates (topleftX, topleftY) <- atomically $ readTVar (_tvOutputLayoutCoordinates tinyWLView)                                  -- (topleftX, topleftY) denotes the view's top-left corner in output layout space
   let SurfaceLocalCoordinates (sx, sy) = SurfaceLocalCoordinates (lx - topleftX, ly - topleftY) -- (sx, sy) denote the cursor's position relative to the tinyWLView's surface space
 
@@ -370,7 +361,6 @@ viewAt tinyWLView (OutputLayoutCoordinates (lx, ly)) = do                       
 -- | of views).
 desktopViewAt :: TinyWLServer -> OutputLayoutCoordinates -> IO (Maybe TinyWLView)
 desktopViewAt  tinyWLServer outputLayoutCoordinates = do
-  putStrLn "desktopViewAt"
   listOfViews             <- atomically $ readTVar (_tsViews tinyWLServer)
   maybeViewWithSubsurface <- findM hasSubsurface listOfViews
   return maybeViewWithSubsurface
@@ -378,8 +368,8 @@ desktopViewAt  tinyWLServer outputLayoutCoordinates = do
         hasSubsurface tinyWLView = do
           maybeSurfaceData <- viewAt tinyWLView outputLayoutCoordinates 
           case maybeSurfaceData of
-               Just _  -> putStrLn "True" >> return True
-               Nothing -> putStrLn "False" >> return False
+               Just _  -> return True
+               Nothing -> return False
 
 -- | This function mutates the server's grabbed view location (specifically: the
 -- | location of its top-left corner in output layout space) based on (i) the
@@ -391,26 +381,26 @@ desktopViewAt  tinyWLServer outputLayoutCoordinates = do
 -- | NOTE: The second argument isn't used in the C implementation.
 processCursorMove :: TinyWLServer -> TimeSpec -> IO ()
 processCursorMove tinyWLServer _ = do
-   putStrLn "processCursorMove"
-   grabbedView <- atomically $ readTVar (tinyWLServer ^. tsGrabbedView)
-   grabbedViewTopLeft@(OutputLayoutCoordinates (grabbedViewLX, grabbedViewLY)) <- atomically $ readTVar (grabbedView ^. tvOutputLayoutCoordinates)
-   surfaceGrabPoint@(SurfaceLocalCoordinates (surfaceGrabPointSX, surfaceGrabPointSY)) <- atomically $ readTVar (_tsGrab tinyWLServer)
+   maybeGrabbedView <- atomically $ readTVar (tinyWLServer ^. tsGrabbedView)
+   maybeSurfaceGrabPoint <- atomically $ readTVar (tinyWLServer ^. tsGrab)
+   case (maybeGrabbedView, maybeSurfaceGrabPoint) of
+     (Just grabbedView, Just (SurfaceLocalCoordinates (surfaceGrabPointSX, surfaceGrabPointSY))) -> do
+              grabbedViewTopLeft@(OutputLayoutCoordinates (grabbedViewLX, grabbedViewLY)) <- atomically $ readTVar (grabbedView ^. tvOutputLayoutCoordinates)
+              let cursor = (_tsCursor tinyWLServer)
+              cursorLX <- getCursorX cursor
+              cursorLY <- getCursorY cursor
+              let cursorPosition = OutputLayoutCoordinates (cursorLX, cursorLY)
+              let newGrabbedViewTopLeft = OutputLayoutCoordinates (cursorLX - surfaceGrabPointSX, cursorLY - surfaceGrabPointSY)
 
-   let cursor = (_tsCursor tinyWLServer)
-   cursorLX <- getCursorX cursor
-   cursorLY <- getCursorY cursor
-   let cursorPosition = OutputLayoutCoordinates (cursorLX, cursorLY)
-   let newGrabbedViewTopLeft = OutputLayoutCoordinates (cursorLX - surfaceGrabPointSX, cursorLY - surfaceGrabPointSY)
-
-   -- Nested TVars require us to mutate twice :(
-   atomically $ writeTVar (grabbedView ^. tvOutputLayoutCoordinates) newGrabbedViewTopLeft
-   atomically $ writeTVar (tinyWLServer ^. tsGrabbedView) grabbedView
+              -- Nested TVars require us to mutate twice :(
+              atomically $ writeTVar (grabbedView ^. tvOutputLayoutCoordinates) newGrabbedViewTopLeft
+              atomically $ writeTVar (tinyWLServer ^. tsGrabbedView) (Just grabbedView)
+     (_, _) -> putStrLn "No grabbed view for us to move!"
 
 -- | Since VR requires specialized treatment of surface resizing, I'm waiting to
 -- | implement this until later.
 processCursorResize :: TinyWLServer -> TimeSpec -> IO ()
 processCursorResize _ _ = do
-  putStrLn "processCursorResize"
   putStrLn "Window resizing is not yet implemented in haskell-tinywl!"
 
 -- | This function inspects the server's cursor mode, and either hands over to
@@ -424,7 +414,6 @@ processCursorResize _ _ = do
 -- | that previously had focus.
 processCursorMotion :: TinyWLServer -> TimeSpec -> IO ()
 processCursorMotion tinyWLServer timeSpec = do
-  putStrLn "processCursorMotion"
   cursorMode <- atomically $ readTVar (_tsCursorMode tinyWLServer)
   case cursorMode of
        TinyWLCursorMove -> processCursorMove tinyWLServer timeSpec
@@ -444,8 +433,8 @@ processCursorMotion tinyWLServer timeSpec = do
                   xCursorSetImage cursorManager "left_ptr" cursor -- If there's no view, then the server is responsible for drawing the cursor image
                   pointerClearFocus seat -- Clear the pointer focus so future buton events aren't set to the last client that had focus
                 Just viewAtPoint -> do
-                 (subSurfaceAtPoint, SubSurfaceLocalCoordinates (ssx, ssy))  <- fromJust <$> viewAt viewAtPoint cursorPosition
-                 surfaceMotion subSurfaceAtPoint ssx ssy -- The term "subsurface" here is somewhat misleading; this could be either be something like a popup or an ordinary surface associated with a view
+                  (subSurfaceAtPoint, SubSurfaceLocalCoordinates (ssx, ssy))  <- fromJust <$> viewAt viewAtPoint cursorPosition
+                  surfaceMotion subSurfaceAtPoint ssx ssy -- The term "subsurface" here is somewhat misleading; this could be either be something like a popup or an ordinary surface associated with a view
         surfaceMotion :: Ptr WlrSurface -> Double -> Double -> IO ()
         surfaceMotion subSurfaceAtPoint ssx ssy = do
             let seat = (_tsSeat tinyWLServer)
@@ -470,7 +459,6 @@ processCursorMotion tinyWLServer timeSpec = do
 -- | cursor movement in VR). See also `serverCursorMotionAbsolute`.
 serverCursorMotion :: TinyWLServer -> WlListener WlrEventPointerMotion
 serverCursorMotion tinyWLServer = WlListener $ \ptrEventPointerMotion -> do
-  putStrLn "serverCursorMotion"
   eventPointerMotion     <- peek ptrEventPointerMotion
   let eventDevice        = eventPointerMotionDevice eventPointerMotion
   let eventTimeMSec      = eventPointerMotionTime eventPointerMotion
@@ -487,7 +475,6 @@ serverCursorMotion tinyWLServer = WlListener $ \ptrEventPointerMotion -> do
 -- | absolute pointer motion.
 serverCursorMotionAbsolute :: TinyWLServer -> WlListener WlrEventPointerAbsMotion
 serverCursorMotionAbsolute tinyWLServer = WlListener $ \ptrEventPointerMotionAbs -> do
-  putStrLn "serverCursorMotionAbsolute"
   eventPointerMotionAbs                <- peek ptrEventPointerMotionAbs
   let OutputLayoutCoordinates (lx, ly) = OutputLayoutCoordinates (eventPointerAbsMotionX eventPointerMotionAbs,
                                                                   eventPointerAbsMotionY eventPointerMotionAbs)
@@ -498,13 +485,11 @@ serverCursorMotionAbsolute tinyWLServer = WlListener $ \ptrEventPointerMotionAbs
   processCursorMotion tinyWLServer (toTimeSpec eventTimeMSec32) -- Wraps our motion handlers and emits events to clients; see above.
   -- warpCursorAbs :: Ptr WlrCursor -> Maybe (Ptr InputDevice) -> Maybe Double -> Maybe Double -> IO ()
   -- moveCursor cursor (Just eventDevice) eventDeltaX eventDeltaY -- Causes _relative_ pointer motion, and I *think* ultimately just modifies *cursor state*
-  putStrLn "end of serverCursorMotionAbsolute"
   return ()
 
 -- | This event is forwarded by the cursor when a pointer emits a button event.
 serverCursorButton :: TinyWLServer -> WlListener WlrEventPointerButton
 serverCursorButton tinyWLServer = WlListener $ \ptrEventPointerButton -> do
-  putStrLn "serverCursorButton"
   let seat = (tinyWLServer ^. tsSeat)
   eventPointerButton <- peek ptrEventPointerButton
   let device = eventPointerButtonDevice eventPointerButton :: Ptr InputDevice
@@ -530,7 +515,6 @@ serverCursorButton tinyWLServer = WlListener $ \ptrEventPointerButton -> do
 -- | example when you move the scroll wheel (we'll use this VR touchpad scrolling).
 serverCursorAxis :: TinyWLServer -> WlListener WlrEventPointerAxis
 serverCursorAxis tinyWLServer = WlListener $ \ptrEventPointerAxis -> do
-  putStrLn "serverCursorAxis"
   let seat            = (tinyWLServer ^. tsSeat)
   event               <- peek ptrEventPointerAxis
   let device          = eventPointerAxisDevice event      :: Ptr InputDevice
@@ -551,7 +535,6 @@ serverCursorAxis tinyWLServer = WlListener $ \ptrEventPointerAxis -> do
 -- | just an inline-C function.
 renderSurface  :: Ptr WlrSurface -> SurfaceDimension -> RenderData -> IO ()
 renderSurface  ptrWlrSurface surfaceDimension@(SurfaceDimension (sx, sy)) renderData = do
-  putStrLn "renderSurface "
   let tinyWLView = (renderData ^. rdView)
   viewLocation@(OutputLayoutCoordinates (lx, ly)) <- atomically $ readTVar (tinyWLView ^. tvOutputLayoutCoordinates)
 
@@ -621,16 +604,15 @@ renderSurface  ptrWlrSurface surfaceDimension@(SurfaceDimension (sx, sy)) render
 -- | implement a bunch of Storable instances).
 renderSurfaceIteratorClosure :: RenderData -> Ptr C'WlrSurface -> CInt -> CInt -> Ptr () -> IO ()
 renderSurfaceIteratorClosure renderData ptrWlrSurface' sx sy _ = do
-  putStrLn "renderSurfaceIteratorClosure"
   let ptrWlrSurface = toC2HS ptrWlrSurface'
   renderSurface ptrWlrSurface (SurfaceDimension ((fromIntegral sx), (fromIntegral sy))) renderData
 
 -- | This function is called every time an output is ready to display a frame.
+-- | TODO: FPS indicator (& compare to tinywl.c).
 outputFrame :: TinyWLOutput -> WlListener WlrOutput
 outputFrame tinyWLOutput = WlListener $ \_ -> do
   let ptrRenderer = (tinyWLOutput ^. toServer ^. tsRenderer)
   now <- getTime Realtime
-  putStrLn $ "outputFrame" ++ (show now)
   let wlrOutput = (tinyWLOutput ^. toWlrOutput)
   maybeOutputCurrent <- makeOutputCurrent wlrOutput -- If this returns 0, then we shouldn't anything
   case maybeOutputCurrent of
@@ -639,7 +621,6 @@ outputFrame tinyWLOutput = WlListener $ \_ -> do
 
   where renderViews:: Ptr WlrOutput -> Ptr Renderer -> TimeSpec -> IO ()
         renderViews wlrOutput ptrRenderer now = do
-            putStrLn "renderViews begin"
             reverseViewList <- reverse <$> (atomically $ readTVar (tinyWLOutput ^. toServer ^. tsViews))
             let reverseRendererList = fmap (\view -> RenderData { _rdOutput = wlrOutput
                                                                 , _rdRenderer = ptrRenderer
@@ -655,10 +636,9 @@ outputFrame tinyWLOutput = WlListener $ \_ -> do
             -- This is needed in case hardware cursors are not supported by your
             -- hardware; it renders cursor on top of your views at the hardware
             -- level; it won't do anything if hardware cursors are enabled.
-            -- [C.exp| void {wlr_output_render_software_cursors($(struct wlr_output * wlrOutput'), $(void * nullPtr))} |]
+            [C.exp| void {wlr_output_render_software_cursors($(struct wlr_output * wlrOutput'), $(void * nullPtr))} |]
             rendererEnd ptrRenderer
             swapOutputBuffers wlrOutput Nothing Nothing -- Swapping buffers shows the actual frame on screen
-            putStrLn "renderViews end"
             return ()
 
         -- This function assumes its called in between `rendererBegin` and `rendererEnd`
@@ -676,12 +656,10 @@ outputFrame tinyWLOutput = WlListener $ \_ -> do
                   True -> [C.exp| void { wlr_xdg_surface_for_each_surface($(struct wlr_xdg_surface * viewXdgSurface), $(wlr_surface_iterator_func_t renderSurfaceIteratorT), $(void * nullPtr))}|] -- Calls renderSurfaceIteratorT for each surface among xdg_surface's toplevel and popups (hsroots doesn't provide).
 
             freeHaskellFunPtr renderSurfaceIteratorT
-            putStrLn "Function freed"
 -- | This is an event handler raised by the backend when a new output (i.e.,
 -- | display or monitor) becomes available.
 serverNewOutput :: TinyWLServer -> WlListener WlrOutput
 serverNewOutput tinyWLServer = WlListener $ \ptrWlrOutput -> do
-  putStrLn "serverNewOutput"
   -- Sets the outputs (width, height, refresh rate) which depends on your hardware.
   -- This is only necessary for some backends (i.e., DRM+KMS). Here we just pick
   -- the first mode supported in the list retrieved.
@@ -711,7 +689,6 @@ serverNewOutput tinyWLServer = WlListener $ \ptrWlrOutput -> do
   -- manufacturerer, etc).
   createOutputGlobal ptrWlrOutput
 
-
   where  setOutputModeAutomatically :: Ptr WlrOutput -> IO ()
          setOutputModeAutomatically ptrWlrOutput = do
           hasModes' <- hasModes ptrWlrOutput
@@ -724,7 +701,6 @@ serverNewOutput tinyWLServer = WlListener $ \ptrWlrOutput -> do
 -- | on-screen").
 xdgSurfaceMap :: TinyWLView -> WlListener WlrXdgSurface
 xdgSurfaceMap tinyWLView = WlListener $ \_ -> do
-  putStrLn "xdgSurfaceMap"
   maybeSurface <- xdgSurfaceGetSurface (tinyWLView ^. tvXdgSurface)
 
   -- Set the XDG surface as mapped
@@ -739,13 +715,11 @@ xdgSurfaceMap tinyWLView = WlListener $ \_ -> do
 -- | Called when the surface is "unmapped", and should no longer be shown.
 xdgSurfaceUnmap :: TinyWLView -> WlListener WlrXdgSurface
 xdgSurfaceUnmap tinyWLView = WlListener $ \_ -> do
-  putStrLn "xdgSurfaceUnmap"
   atomically $ writeTVar (tinyWLView ^. tvMapped) False
 
 -- | Called when the surface is destroyed, and should never be shown again.
 xdgSurfaceDestroy :: TinyWLView -> WlListener WlrXdgSurface
 xdgSurfaceDestroy tinyWLView = WlListener $ \_ -> do
-  putStrLn "xdgSurfaceDestroy"
   viewList <- atomically $ readTVar (tinyWLView ^. tvServer ^. tsViews)
   let cleansedViewList = removeTinyWLViewFromList tinyWLView viewList
 
@@ -758,7 +732,6 @@ xdgSurfaceDestroy tinyWLView = WlListener $ \_ -> do
 -- | mutates the server to signal its in the middle of a grab/resize.
 beginInteractive :: TinyWLView -> TinyWLCursorMode -> Int -> IO ()
 beginInteractive tinyWLView cursorMode edges = do
-  putStrLn "beginInteractive"
   let tinyWLServer = tinyWLView ^. tvServer
   let seat' = toInlineC (tinyWLServer ^. tsSeat)
   lastFocusedSurface' <- [C.exp| struct wlr_surface * { $(struct wlr_seat * seat')->pointer_state.focused_surface } |] -- hsroots doesn't provide access to this data structure AFAIK
@@ -788,30 +761,28 @@ beginInteractive tinyWLView cursorMode edges = do
           let geoBoxHeight = (boxHeight geoBox)
 
           -- Mutate server state to reflect that we're in the middle of a grab
-          atomically $ writeTVar (tinyWLServer ^. tsGrabbedView) tinyWLView
+          atomically $ writeTVar (tinyWLServer ^. tsGrabbedView) (Just tinyWLView)
           atomically $ writeTVar (tinyWLServer ^. tsCursorMode) cursorMode
 
           case cursorMode of
-              TinyWLCursorMove -> atomically $ writeTVar (tinyWLServer ^. tsGrab) (SurfaceLocalCoordinates ( (cursorLX - viewLX) , (cursorLY - viewLY) ))   -- Mutate the grab coordinates to their natural surface-local position
-              _                -> atomically $ writeTVar (tinyWLServer ^. tsGrab) (SurfaceLocalCoordinates ( (cursorLX + (fromIntegral geoBoxX)) , (cursorLY + (fromIntegral geoBoxY)) )) -- Totally unclear what this is doing; why not do as above??
+              TinyWLCursorMove -> atomically $ writeTVar (tinyWLServer ^. tsGrab) (Just (SurfaceLocalCoordinates ( (cursorLX - viewLX) , (cursorLY - viewLY) )))   -- Mutate the grab coordinates to their natural surface-local position
+              _                -> atomically $ writeTVar (tinyWLServer ^. tsGrab) (Just (SurfaceLocalCoordinates ( (cursorLX + (fromIntegral geoBoxX)) , (cursorLY + (fromIntegral geoBoxY)) ))) -- Totally unclear what this is doing; why not do as above??
 
           -- More server mutation
-          atomically $ writeTVar (tinyWLServer ^. tsGrabWidth) geoBoxWidth
-          atomically $ writeTVar (tinyWLServer ^. tsGrabHeight) geoBoxHeight
-          atomically $ writeTVar (tinyWLServer ^. tsResizeEdges) edges
+          atomically $ writeTVar (tinyWLServer ^. tsGrabWidth) (Just geoBoxWidth)
+          atomically $ writeTVar (tinyWLServer ^. tsGrabHeight) (Just geoBoxHeight)
+          atomically $ writeTVar (tinyWLServer ^. tsResizeEdges) (Just edges)
 
 -- | Raised when a client requests interactive move (typically because the user
 -- | clicked on their client-side decorations).
 xdgToplevelRequestMove :: TinyWLView -> WlListener MoveEvent
 xdgToplevelRequestMove tinyWLView = WlListener $ \_ -> do
-  putStrLn "xdgToplevelRequestMove"
   beginInteractive tinyWLView TinyWLCursorMove 0
 
 -- | Raised when a client requests interactive resize (typically because the user
 -- | clicked on their client-side decorations).
 xdgToplevelRequestResize :: TinyWLView -> WlListener ResizeEvent
 xdgToplevelRequestResize tinyWLView = WlListener $ \ptrResizeEvent -> do
-  putStrLn "xdgToplevelRequestResize"
   resizeEvent <- peek ptrResizeEvent
   -- let surface = resizeEvtSurface resizeEvent :: Ptr WlrXdgSurface
   -- let seat= resizeEvtSeat    resizeEvent     :: Ptr WlrSeatClient
@@ -823,7 +794,6 @@ xdgToplevelRequestResize tinyWLView = WlListener $ \ptrResizeEvent -> do
 -- | client, either a toplevel (application window) or popup.
 serverNewXdgSurface :: TinyWLServer -> WlListener WlrXdgSurface
 serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
-  putStrLn "serverNewXdgSurface"
   maybeTopLevel <- getXdgToplevel ptrWlrXdgSurface
   case maybeTopLevel of
        Nothing         -> return () -- If the surface is, i.e., a popup or has no XDG "role", then we don't do anything.
@@ -835,8 +805,10 @@ serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
         createServerView :: Ptr WlrXdgSurface -> Ptr WlrXdgToplevel -> IO ()
         createServerView ptrWlrXdgSurface topLevel = do
           -- We use empty TVars to jam into some of the TinyWLView's fields
-          emptyBool <- atomically $ (newTVar undefined) :: IO (TVar Bool)
-          emptyOLC <- atomically $ newTVar undefined :: IO (TVar OutputLayoutCoordinates)
+          falseBool <- atomically $ (newTVar False) :: IO (TVar Bool)
+          -- Should we place all new surfaces at (0,0)?
+          -- The C implementation doesn't specify this, so it's unclear how it knows where to place new surfaces (perhaps because C double types default to 0?).
+          zeroOLC <- atomically $ newTVar (OutputLayoutCoordinates (0,0)) :: IO (TVar OutputLayoutCoordinates) 
 
           let tinyWLView = TinyWLView { _tvServer = tinyWLServer :: TinyWLServer
                                       , _tvXdgSurface              = ptrWlrXdgSurface                      :: Ptr WlrXdgSurface
@@ -845,8 +817,8 @@ serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
                                       , _tvDestroy                 = (xdgSurfaceDestroy tinyWLView)        :: WlListener WlrXdgSurface
                                       , _tvRequestMove             = (xdgToplevelRequestMove tinyWLView )  :: WlListener MoveEvent
                                       , _tvRequestResize           = (xdgToplevelRequestResize tinyWLView) :: WlListener ResizeEvent
-                                      , _tvMapped                  = emptyBool                             :: TVar Bool
-                                      , _tvOutputLayoutCoordinates = emptyOLC                              :: TVar OutputLayoutCoordinates
+                                      , _tvMapped                  = falseBool                             :: TVar Bool
+                                      , _tvOutputLayoutCoordinates = zeroOLC                               :: TVar OutputLayoutCoordinates
                                       }
 
           -- Signals are divided into XdgSurfaceEvents and XdgTopLevelEvents
@@ -872,4 +844,4 @@ serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
           -- (which is consistent with it being the "focused" view)
           serverViews <- atomically $ readTVar (tinyWLServer ^. tsViews)
           let serverViews' = [tinyWLView] ++ serverViews
-          atomically $ writeTVar (tinyWLServer ^. tsViews) serverViews' 
+          atomically $ writeTVar (tinyWLServer ^. tsViews) serverViews'

@@ -88,6 +88,12 @@ instance Storable C'WlListener where
   peek        = error "peek not implemented for C'WlListener"
   poke _ _    = error "poke not implemented for C'WlListener"
 
+instance Storable C'WlSignal where
+  sizeOf _    = fromIntegral $ [C.pure| int { sizeof(struct wl_signal) }|]
+  alignment _ = fromIntegral $ [C.pure| int { alignof(struct wl_signal) }|]
+  peek        = error "peek not implemented for C'WlSignal"
+  poke _ _    = error "poke not implemented for C'WlSignal"
+
 -- |FFI is a relation between C types marshalled from inline-C and C2HS
 -- |(via hsroots and its dependencies).
 class FFI inlinec chs | inlinec -> chs where
