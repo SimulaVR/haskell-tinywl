@@ -1,5 +1,6 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE RecursiveDo #-}
 
 module TinyWL where
 
@@ -87,36 +88,40 @@ data TinyWLServer = TinyWLServer { _tsBackend              :: Ptr Backend
                                  , _tsOutputLayout         :: Ptr WlrOutputLayout
                                  , _tsOutputs              :: TVar [TinyWLOutput]
                                  , _tsNewOutput            :: WlListener WlrOutput
+                                 , _tsListenerTokens       :: [ListenerToken] -- Destroyed at the end of main
                                  }
 
-data TinyWLOutput = TinyWLOutput { _toServer :: TinyWLServer
-                                 , _toWlrOutput :: Ptr WlrOutput
-                                 , _toFrame :: WlListener WlrOutput
+data TinyWLOutput = TinyWLOutput { _toServer         :: TinyWLServer
+                                 , _toWlrOutput      :: Ptr WlrOutput
+                                 , _toFrame          :: WlListener WlrOutput
+                                 , _toListenerTokens :: [ListenerToken] -- Not destroyed anywhere, but should be if Simula links distinct outputs to distinct views
                                  }
 
-data TinyWLView = TinyWLView { _tvServer :: TinyWLServer
-                             , _tvXdgSurface :: Ptr WlrXdgSurface
-                             , _tvMap :: WlListener WlrXdgSurface
-                             , _tvUnmap :: WlListener WlrXdgSurface
-                             , _tvDestroy :: WlListener WlrXdgSurface
-                             , _tvRequestMove :: WlListener MoveEvent
-                             , _tvRequestResize :: WlListener ResizeEvent
-                             , _tvMapped :: TVar Bool
+data TinyWLView = TinyWLView { _tvServer                  :: TinyWLServer
+                             , _tvXdgSurface              :: Ptr WlrXdgSurface
+                             , _tvMap                     :: WlListener WlrXdgSurface
+                             , _tvUnmap                   :: WlListener WlrXdgSurface
+                             , _tvDestroy                 :: WlListener WlrXdgSurface
+                             , _tvRequestMove             :: WlListener MoveEvent
+                             , _tvRequestResize           :: WlListener ResizeEvent
+                             , _tvMapped                  :: TVar Bool
                              , _tvOutputLayoutCoordinates :: TVar OutputLayoutCoordinates -- Denotes top-left corner of view in OutputLayoutCoordinates
+                             , _tvListenerTokens          :: [ListenerToken] -- Destroyed in the xdg surface destroy handler
                              }
 
-data TinyWLKeyboard = TinyWLKeyboard { _tkServer :: TinyWLServer
-                                     , _tkDevice :: Ptr InputDevice
-                                     , _tkModifiers :: WlListener ()
-                                     , _tkKey :: WlListener EventKey
+data TinyWLKeyboard = TinyWLKeyboard { _tkServer         :: TinyWLServer
+                                     , _tkDevice         :: Ptr InputDevice
+                                     , _tkModifiers      :: WlListener ()
+                                     , _tkKey            :: WlListener EventKey
+                                     , _tkListenerTokens :: [ListenerToken] -- Not destroyed anywhere
                                      }
 
 -- Used to move all of the data necessary to render a surface from the top-level
 -- frame handler to the per-surface render function.
-data RenderData = RenderData { _rdOutput :: Ptr WlrOutput
+data RenderData = RenderData { _rdOutput   :: Ptr WlrOutput
                              , _rdRenderer :: Ptr Renderer
-                             , _rdView :: TinyWLView
-                             , _rdWhen :: TimeSpec
+                             , _rdView     :: TinyWLView
+                             , _rdWhen     :: TimeSpec
                              }
 
 makeLenses ''TinyWLServer
@@ -245,26 +250,28 @@ keyboardHandleKey tinyWLKeyboard = WlListener $ \ptrEventKey ->
 -- | list.
 serverNewKeyboard :: TinyWLServer -> Ptr InputDevice -> IO ()
 serverNewKeyboard server device = do
-  let tinyWLKeyboard = TinyWLKeyboard { _tkServer    = server                                   :: TinyWLServer
-                                      , _tkDevice    = device                                   :: Ptr InputDevice
-                                      , _tkModifiers = (keyboardHandleModifiers tinyWLKeyboard) :: WlListener ()
-                                      , _tkKey       = (keyboardHandleKey       tinyWLKeyboard) :: WlListener EventKey
-                                      }
-
   deviceType <- inputDeviceType device
   maybeXkbContext <- newContext defaultFlags
 
   case (deviceType, maybeXkbContext) of
-       ((DeviceKeyboard ptrWlrKeyboard), (Just xkbContext)) -> handleKeyboard tinyWLKeyboard ptrWlrKeyboard xkbContext
+       ((DeviceKeyboard ptrWlrKeyboard), (Just xkbContext)) -> mdo tokens <- handleKeyboard tinyWLKeyboard ptrWlrKeyboard xkbContext
+                                                                   let tinyWLKeyboard = TinyWLKeyboard { _tkServer    = server                                   :: TinyWLServer
+                                                                                                       , _tkDevice    = device                                   :: Ptr InputDevice
+                                                                                                       , _tkModifiers = (keyboardHandleModifiers tinyWLKeyboard) :: WlListener ()
+                                                                                                       , _tkKey       = (keyboardHandleKey       tinyWLKeyboard) :: WlListener EventKey
+                                                                                                       , _tkListenerTokens = tokens                              :: [ListenerToken]
+                                                                                                       }
+                                                                   makeKeyboardActiveHead tinyWLKeyboard
+                                                                   return ()
        _ -> putStrLn "Failed to get keyboard!"
-  where handleKeyboard :: TinyWLKeyboard -> Ptr WlrKeyboard -> Context -> IO ()
+  where handleKeyboard :: TinyWLKeyboard -> Ptr WlrKeyboard -> Context -> IO ([ListenerToken])
         handleKeyboard tinyWLKeyboard deviceKeyboard context = do
           maybeKeymap <- newKeymapFromNames context noPrefs
           case maybeKeymap of
-               Nothing       -> putStrLn "Failed to get keymap!"
+               Nothing       -> putStrLn "Failed to get keymap!" >> return []
                (Just keymap) -> do setKeymapAndRepeatInfo deviceKeyboard keymap
-                                   handleSignals tinyWLKeyboard deviceKeyboard
-                                   makeKeyboardActiveHead tinyWLKeyboard
+                                   tokens <- handleSignals tinyWLKeyboard deviceKeyboard
+                                   return tokens
 
         setKeymapAndRepeatInfo :: Ptr WlrKeyboard -> Keymap -> IO ()
         setKeymapAndRepeatInfo keyboard keymap = do
@@ -272,14 +279,15 @@ serverNewKeyboard server device = do
           let keyboard' = toInlineC keyboard
           [C.exp| void { wlr_keyboard_set_repeat_info($(struct wlr_keyboard * keyboard'), 25, 600) }|] -- hsroots doesn't provide this call.
 
-        handleSignals :: TinyWLKeyboard -> Ptr WlrKeyboard -> IO ()
+        handleSignals :: TinyWLKeyboard -> Ptr WlrKeyboard -> IO ([ListenerToken])
         handleSignals tinyWLKeyboard keyboard = do
           let keyboardSignals = getKeySignals keyboard
           let keySignalKey' = (keySignalKey keyboardSignals)
           let keySignalModifiers' = (keySignalModifiers keyboardSignals)
-          addListener (_tkModifiers tinyWLKeyboard) keySignalModifiers' -- a = TinyWLKeyboard
-          addListener (_tkKey tinyWLKeyboard)       keySignalKey' -- a = EventKey
-          return ()
+          token1 <- addListener (_tkModifiers tinyWLKeyboard) keySignalModifiers' -- a = TinyWLKeyboard
+          token2 <- addListener (_tkKey tinyWLKeyboard)       keySignalKey' -- a = EventKey
+          let tokens = [token1, token2]
+          return tokens
 
         makeKeyboardActiveHead :: TinyWLKeyboard -> IO ()
         makeKeyboardActiveHead tinyWLKeyboard = do
@@ -659,43 +667,45 @@ outputFrame tinyWLOutput = WlListener $ \_ -> do
 -- | This is an event handler raised by the backend when a new output (i.e.,
 -- | display or monitor) becomes available.
 serverNewOutput :: TinyWLServer -> WlListener WlrOutput
-serverNewOutput tinyWLServer = WlListener $ \ptrWlrOutput -> do
-  -- Sets the outputs (width, height, refresh rate) which depends on your hardware.
-  -- This is only necessary for some backends (i.e., DRM+KMS). Here we just pick
-  -- the first mode supported in the list retrieved.
-  setOutputModeAutomatically ptrWlrOutput
+serverNewOutput tinyWLServer = WlListener $ \ptrWlrOutput -> mdo
+    -- Sets the outputs (width, height, refresh rate) which depends on your hardware.
+    -- This is only necessary for some backends (i.e., DRM+KMS). Here we just pick
+    -- the first mode supported in the list retrieved.
+    setOutputModeAutomatically ptrWlrOutput
 
-  let tinyWLOutput = TinyWLOutput { _toServer = tinyWLServer
-                                  , _toWlrOutput = ptrWlrOutput
-                                  , _toFrame = (outputFrame tinyWLOutput)
-                                  }
-  let signal = outSignalFrame (getOutputSignals ptrWlrOutput)
-  addListener (tinyWLOutput ^. toFrame) signal
+    let tinyWLOutput = TinyWLOutput { _toServer = tinyWLServer
+                                    , _toWlrOutput = ptrWlrOutput
+                                    , _toFrame = (outputFrame tinyWLOutput)
+                                    , _toListenerTokens = tokens
+                                    }
+    let signal = outSignalFrame (getOutputSignals ptrWlrOutput)
+    token <- addListener (tinyWLOutput ^. toFrame) signal
+    let tokens = [token]
 
-  -- Add output to head of server's output list
-  outputsList  <- atomically $ readTVar (tinyWLServer ^. tsOutputs)
-  let outputsListNew = tinyWLOutput:outputsList
-  atomically $ writeTVar (tinyWLServer ^. tsOutputs) outputsListNew
+    -- Add output to head of server's output list
+    outputsList  <- atomically $ readTVar (tinyWLServer ^. tsOutputs)
+    let outputsListNew = tinyWLOutput:outputsList
+    atomically $ writeTVar (tinyWLServer ^. tsOutputs) outputsListNew
 
-  let ptrOutputLayout = tinyWLServer ^. tsOutputLayout
+    let ptrOutputLayout = tinyWLServer ^. tsOutputLayout
 
-  -- This function automatically adds output to the layout in the left-to-right
-  -- order in which they appear. We might have to adjust this in Simula if we
-  -- are to treat each surface sprite as as its own output.
-  addOutputAuto ptrOutputLayout ptrWlrOutput
+    -- This function automatically adds output to the layout in the left-to-right
+    -- order in which they appear. We might have to adjust this in Simula if we
+    -- are to treat each surface sprite as as its own output.
+    addOutputAuto ptrOutputLayout ptrWlrOutput
 
-  -- Adds the wl_output global to the display, which Wayland clients can use to
-  -- find out information about this output (such as DPI, scale factor,
-  -- manufacturerer, etc).
-  createOutputGlobal ptrWlrOutput
+    -- Adds the wl_output global to the display, which Wayland clients can use to
+    -- find out information about this output (such as DPI, scale factor,
+    -- manufacturerer, etc).
+    createOutputGlobal ptrWlrOutput
 
-  where  setOutputModeAutomatically :: Ptr WlrOutput -> IO ()
-         setOutputModeAutomatically ptrWlrOutput = do
-          hasModes' <- hasModes ptrWlrOutput
-          when hasModes' $ do modes <- getModes ptrWlrOutput
-                              let headMode = head modes -- We might want to reverse this list first to mimic C implementation
-                              setOutputMode headMode ptrWlrOutput
-                              return ()
+    where setOutputModeAutomatically :: Ptr WlrOutput -> IO ()
+          setOutputModeAutomatically ptrWlrOutput = do
+            hasModes' <- hasModes ptrWlrOutput
+            when hasModes' $ do modes <- getModes ptrWlrOutput
+                                let headMode = head modes -- We might want to reverse this list first to mimic C implementation
+                                setOutputMode headMode ptrWlrOutput
+                                return ()
 
 -- | Called when the surface is "mapped" (i.e., "ready to display
 -- | on-screen").
@@ -720,6 +730,8 @@ xdgSurfaceUnmap tinyWLView = WlListener $ \_ -> do
 -- | Called when the surface is destroyed, and should never be shown again.
 xdgSurfaceDestroy :: TinyWLView -> WlListener WlrXdgSurface
 xdgSurfaceDestroy tinyWLView = WlListener $ \_ -> do
+  mapM_ freeListenerToken (tinyWLView ^. tvListenerTokens)
+
   viewList <- atomically $ readTVar (tinyWLView ^. tvServer ^. tsViews)
   let cleansedViewList = removeTinyWLViewFromList tinyWLView viewList
 
@@ -803,7 +815,7 @@ serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
         -- to the proper signals, and adds it to the front of the server's view
         -- list
         createServerView :: Ptr WlrXdgSurface -> Ptr WlrXdgToplevel -> IO ()
-        createServerView ptrWlrXdgSurface topLevel = do
+        createServerView ptrWlrXdgSurface topLevel = mdo
           -- We use empty TVars to jam into some of the TinyWLView's fields
           falseBool <- atomically $ (newTVar False) :: IO (TVar Bool)
           -- Should we place all new surfaces at (0,0)?
@@ -819,6 +831,7 @@ serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
                                       , _tvRequestResize           = (xdgToplevelRequestResize tinyWLView) :: WlListener ResizeEvent
                                       , _tvMapped                  = falseBool                             :: TVar Bool
                                       , _tvOutputLayoutCoordinates = zeroOLC                               :: TVar OutputLayoutCoordinates
+                                      , _tvListenerTokens          = tokens                                :: [ListenerToken]
                                       }
 
           -- Signals are divided into XdgSurfaceEvents and XdgTopLevelEvents
@@ -834,11 +847,12 @@ serverNewXdgSurface tinyWLServer = WlListener $ \ptrWlrXdgSurface -> do
           let signalToplevelMove                = xdgToplevelEvtMove  eventToplevelWlrXdgToplevelEvents :: Ptr (WlSignal MoveEvent)
           let signalToplevelResize              = xdgToplevelEvtResize  eventToplevelWlrXdgToplevelEvents :: Ptr (WlSignal ResizeEvent)
 
-          addListener (tinyWLView ^. tvMap) signalMap                      -- xdg_surface event
-          addListener (tinyWLView ^. tvUnmap) signalUnmap                  -- xdg_surface event
-          addListener (tinyWLView ^. tvDestroy) signalDestroy              -- xdg_surface event
-          addListener (tinyWLView ^. tvRequestMove) signalToplevelMove     -- toplevel event
-          addListener (tinyWLView ^. tvRequestResize) signalToplevelResize -- toplevel event
+          token1 <- addListener (tinyWLView ^. tvMap) signalMap                      -- xdg_surface event
+          token2 <- addListener (tinyWLView ^. tvUnmap) signalUnmap                  -- xdg_surface event
+          token3 <- addListener (tinyWLView ^. tvDestroy) signalDestroy              -- xdg_surface event
+          token4 <- addListener (tinyWLView ^. tvRequestMove) signalToplevelMove     -- toplevel event
+          token5 <- addListener (tinyWLView ^. tvRequestResize) signalToplevelResize -- toplevel event
+          let tokens = [token1, token2, token3, token4, token5]
 
           -- We finally add/mutate the view to the head of our server's list
           -- (which is consistent with it being the "focused" view)

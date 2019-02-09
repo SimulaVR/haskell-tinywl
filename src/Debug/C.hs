@@ -94,6 +94,7 @@ initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
   ,  (C.Struct "wlr_seat_client", [t|C'WlrSeatClient|])
   ,  (C.Struct "wlr_xdg_shell", [t|C'WlrXdgShell|])
   ,  (C.Struct "timespec", [t|TimeSpec|])
+  ,  (C.Struct "wl_signal", [t|C'WlSignal|])
   ,  (C.TypeName "wlr_surface_iterator_func_t", [t|C'WlrSurfaceIteratorFuncT|])
   -- Omitted XKB Types: xkb_keysym_t, xkb_state, xkb_rule_names, xkb_context, xkb_keymap
 -- (C.TypeName "wl_shm_format_argb8888", [t|C'WlShmFormatArgb8888|])

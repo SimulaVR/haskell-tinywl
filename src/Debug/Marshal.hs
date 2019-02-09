@@ -96,7 +96,7 @@ instance Storable C'WlSignal where
 
 -- |FFI is a relation between C types marshalled from inline-C and C2HS
 -- |(via hsroots and its dependencies).
-class FFI inlinec chs | inlinec -> chs where
+class FFI inlinec chs | chs -> inlinec where
   toC2HS :: inlinec -> chs
   toInlineC :: chs -> inlinec
 
@@ -177,6 +177,10 @@ instance FFI (Ptr C'WlrSeatPointerState) (Ptr WlrSeatPointerState) where
   toInlineC = castPtr
 
 instance FFI (Ptr C'WlrSeatClient) (Ptr WlrSeatClient) where
+  toC2HS = castPtr
+  toInlineC = castPtr
+
+instance FFI (Ptr C'WlSignal) (Ptr (WlSignal a)) where
   toC2HS = castPtr
   toInlineC = castPtr
 

@@ -38,10 +38,10 @@ import Graphics.Wayland.WlRoots.Util
 import TinyWL
 
 -- Turn off inline-C
--- import qualified Language.C.Inline as C
--- import           Debug.C as C
--- import           Debug.Marshal
--- C.initializeTinyWLCtxAndIncludes
+import qualified Language.C.Inline as C
+import           Debug.C as C
+import           Debug.Marshal
+C.initializeTinyWLCtxAndIncludes
 
 main :: IO ()
 main = mdo setLogPrio Debug
@@ -67,32 +67,40 @@ main = mdo setLogPrio Debug
            emptyOutputs     <- atomically $ (newTVar []) :: IO (TVar [TinyWLOutput])
 
            let signalBackendNewOutput = backendEvtOutput    (backendGetSignals ptrBackend)
-           addListener (tinyWLServer ^. tsNewOutput            ) signalBackendNewOutput
+           token1 <- addListener (tinyWLServer ^. tsNewOutput            ) signalBackendNewOutput
 
-           xdgShell <- xdgShellCreate (getListenerFunc (serverNewXdgSurface tinyWLServer)) displayServer -- This automatically adds the serverNewXdgSurface listener
+           -- BEGIN SHELL
+           -- xdgShell <- xdgShellCreate (getListenerFunc (serverNewXdgSurface tinyWLServer)) displayServer -- This automatically adds the serverNewXdgSurface listener
+           let displayServer' = toInlineC displayServer
+           xdgShell' <- [C.exp| struct wlr_xdg_shell * { wlr_xdg_shell_create($(struct wl_display * displayServer'))} |]
+           let xdgShell = toC2HS xdgShell'
+           xdgShellSignal' <- [C.block| struct wl_signal * {struct wl_signal * signal_ptr;
+                                                         signal_ptr = &$(struct wlr_xdg_shell * xdgShell')->events.new_surface;
+                                                         return signal_ptr;} |]
+           let xdgShellSignal = (toC2HS xdgShellSignal') :: Ptr (WlSignal WlrXdgSurface)
+           token2 <- addListener (serverNewXdgSurface tinyWLServer) xdgShellSignal
+           -- END SHELL
 
            ptrCursor <- createCursor
            attachOutputLayout ptrCursor outputLayout
 
            xCursorManager <- xCursorManagerCreate "" 24 -- Does empty string work?
            xCursorLoad xCursorManager 1
-
            let signalCursorMotion     = cursorMotion        (cursorGetEvents ptrCursor)
            let signalCursorMotionAbs  = cursorMotionAbs     (cursorGetEvents ptrCursor)
            let signalCursorButton     = cursorButton        (cursorGetEvents ptrCursor)
            let signalCursorAxis       = cursorAxis          (cursorGetEvents ptrCursor)
-           addListener (tinyWLServer ^. tsCursorMotion         ) signalCursorMotion
-           addListener (tinyWLServer ^. tsCursorMotionAbsolute ) signalCursorMotionAbs
-           addListener (tinyWLServer ^. tsCursorButton         ) signalCursorButton
-           addListener (tinyWLServer ^. tsCursorAxis           ) signalCursorAxis
+           token3 <- addListener (tinyWLServer ^. tsCursorMotion         ) signalCursorMotion
+           token4 <- addListener (tinyWLServer ^. tsCursorMotionAbsolute ) signalCursorMotionAbs
+           token5 <- addListener (tinyWLServer ^. tsCursorButton         ) signalCursorButton
+           token6 <- addListener (tinyWLServer ^. tsCursorAxis           ) signalCursorAxis
 
            let signalBackendNewInput  = backendEvtInput     (backendGetSignals ptrBackend)
-           addListener (tinyWLServer ^. tsNewInput      ) signalBackendNewInput
+           token7 <- addListener (tinyWLServer ^. tsNewInput      ) signalBackendNewInput
 
            seat <- createSeat displayServer "seat0"
-
            let signalRequestSetCursor = seatSignalSetCursor (seatGetSignals seat)
-           addListener (tinyWLServer ^. tsRequestCursor ) signalRequestSetCursor
+           token8 <- addListener (tinyWLServer ^. tsRequestCursor ) signalRequestSetCursor
 
            let tinyWLServer = TinyWLServer { _tsBackend              = ptrBackend                                :: Ptr Backend
                                            , _tsRenderer             = ptrRenderer                               :: Ptr Renderer
@@ -118,7 +126,10 @@ main = mdo setLogPrio Debug
                                            , _tsOutputLayout         = outputLayout                              :: Ptr WlrOutputLayout
                                            , _tsOutputs              = emptyOutputs                              :: TVar [TinyWLOutput]
                                            , _tsNewOutput            = (serverNewOutput tinyWLServer)            :: WlListener WlrOutput
+                                           , _tsListenerTokens       = tokens                                    :: [ListenerToken]
                                            }
+
+           let tokens = [token1, token2, token3, token4, token5, token6, token7, token8]
 
            displayAddSocket displayServer Nothing -- Does this work as wl_display_add_socket_auto?
                                                  -- NOTE: If we were proper here we'd check if ther ewas a socket actually created before proceeding
@@ -128,10 +139,10 @@ main = mdo setLogPrio Debug
 
            -- setenv("WAYLAND_DISPLAY", socket, true);
            -- wlr_log(WLR_INFO, "Running Wayland compositor on WAYLAND_DISPLAY=%s", socket);
-           putStrLn $ "==============================" ++ (show xdgShell)
            displayRun displayServer
            -- wl_display_destroy_clients(server.wl_display);
            displayDestroy displayServer
+           mapM_ freeListenerToken tokens
 
            -- tinywl.c omits destroying almost all of the data structures we
            -- created above (i.e., the compositor, ..). Why?

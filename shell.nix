@@ -17,6 +17,7 @@ pkgs.haskell.lib.buildStackProject {
                              udev
                              cabal-install
                              pkgconfig
+                             (callPackage ./nix/libdrm.nix { } )
                           ];
 
   LANG = "en_US.UTF-8";
