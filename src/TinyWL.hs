@@ -4,6 +4,7 @@
 
 module TinyWL where
 
+import           Debug.Trace
 import           Control.Lens hiding (Context)
 import           Control.Concurrent.STM.TVar
 import           Control.Exception
@@ -164,14 +165,16 @@ removeTinyWLViewFromList tinyWLView list = filter (not . isSameView tinyWLView) 
 -- use that to extract a Ptr WlrSurface. For now I'll keep the second argument
 -- (which seems redundant) to mirror the C implementation.
 focusView :: TinyWLView -> Ptr WlrSurface -> IO ()
+focusView tinyWLView ptrWlrSurface | trace ("focusView called with (xdgSurface, ptrWlrSurface): " ++ (show (tinyWLView ^. tvXdgSurface)) ++ ", " ++ (show ptrWlrSurface)) False = undefined
 focusView tinyWLView ptrWlrSurface = do
   let ptrWlrSeat =_tsSeat (_tvServer tinyWLView)
   prevSurface <- getKeyboardFocus (getKeyboardState ptrWlrSeat)
-  when (ptrWlrSurface /= prevSurface) $ do -- If we're already focused on this view/surface, then this function doesn't do anything.
-          when (prevSurface /= nullPtr) $ deactivatePreviouslyFocusedSurface prevSurface
-          mutateViewToFront tinyWLView
-          setActivated (_tvXdgSurface tinyWLView) True
-          keyboardNotifyEnterIntoNewSurface ptrWlrSeat (_tvXdgSurface tinyWLView)
+  when (ptrWlrSurface /= prevSurface) $ do putStrLn $ "prevSurface (seat->keyboard_state.focused_surface) at the beginning of focusView: " ++ (show prevSurface)
+                                           putStrLn $ "(ptrWlrSurface /= prevSurface: " ++ (show (ptrWlrSurface /= prevSurface))
+                                           when (prevSurface /= nullPtr) $ deactivatePreviouslyFocusedSurface prevSurface
+                                           mutateViewToFront tinyWLView
+                                           setActivated (_tvXdgSurface tinyWLView) True
+                                           keyboardNotifyEnterIntoNewSurface ptrWlrSeat (_tvXdgSurface tinyWLView)
   where
         -- |Let's client know it no longer has focus (so it can, i.e., stop displaying caret).
         deactivatePreviouslyFocusedSurface prevSurface = do
@@ -191,9 +194,14 @@ focusView tinyWLView ptrWlrSurface = do
               (Nothing, _)               -> putStrLn "Couldn't get keyboard!"
               (_, Nothing)               -> putStrLn "Couldn't get surface!"
               (Just ptrWlrKeyboard, Just surface) -> do
+                putStrLn $ "view->xdg_surface->surface (inside focusView): " ++ (show surface)
                 (keycodes, numKeycodes) <- getKeyboardKeys ptrWlrKeyboard
                 let modifiers = getModifierPtr ptrWlrKeyboard
-                keyboardNotifyEnter ptrWlrSeat surface keycodes numKeycodes modifiers
+                keyboardNotifyEnter ptrWlrSeat surface keycodes numKeycodes modifiers -- Should set focused_surface to surface, but doesn't.
+                let seat' = toInlineC ptrWlrSeat
+                let surface' = toInlineC surface
+                seatKeyboardStateFocusedSurface <- [C.block| struct wlr_surface * {return $(struct wlr_seat * seat')->keyboard_state.focused_surface;} |]
+                putStrLn $ "seat->keyboard_state.focused_surface (at the end of focusView): " ++ (show seatKeyboardStateFocusedSurface)
 
 -- | A wl_listener that (i) sets the TinyWLKeyboard as active in the seat (since
 -- | wayland forces us to have one active keyboard as a time per seat) and (ii) sends
@@ -286,7 +294,14 @@ serverNewKeyboard server device = do
           let keySignalModifiers' = (keySignalModifiers keyboardSignals)
           token1 <- addListener (_tkModifiers tinyWLKeyboard) keySignalModifiers' -- a = TinyWLKeyboard
           token2 <- addListener (_tkKey tinyWLKeyboard)       keySignalKey' -- a = EventKey
-          let tokens = [token1, token2]
+
+          let seat' = toInlineC (server ^. tsSeat)
+          keyboardFocusChangeSignal' <- [C.exp| struct wl_signal * { &($(struct wlr_seat * seat')->keyboard_state.events.focus_change)}|]
+          let keyboardFocusChangeSignal = (toC2HS keyboardFocusChangeSignal') :: Ptr (WlSignal ())
+
+          token3 <- addListener (keyboardHandleFocusChange tinyWLKeyboard) keyboardFocusChangeSignal
+
+          let tokens = [token1, token2, token3]
           return tokens
 
         makeKeyboardActiveHead :: TinyWLKeyboard -> IO ()
@@ -294,6 +309,17 @@ serverNewKeyboard server device = do
           seatSetKeyboard (_tsSeat server) (_tkDevice tinyWLKeyboard)
           keyboardList <- atomically $ readTVar (_tsKeyboards server)
           atomically $ writeTVar (_tsKeyboards server) ([tinyWLKeyboard] ++ keyboardList)
+
+        keyboardHandleFocusChange :: TinyWLKeyboard -> WlListener ()
+        keyboardHandleFocusChange tinyWLKeyboard = WlListener $ \ptr -> do
+          ns <- [C.block| struct wlr_surface * {
+                                  struct wlr_seat_keyboard_focus_change_event * event;
+                                  event = (struct wlr_seat_keyboard_focus_change_event *) $(void * ptr);
+                                  //printf("seat: %p\nold_surface: %p\nnew_surface: %p", event->seat, event->old_surface, event->new_surface);
+                                  //printf("new_surface: %p", event->new_surface);
+                                  return event->new_surface;
+              } |]
+          putStrLn $ "New surface focused on: " ++ (show ns)
 
 -- | Here we just wrap a call to wlr_cursor_attach_input_device. The reason this function is so simple is that we all pointer handling is proxied through wlr_cursor by default. VR inputs will likely involve studying wlr_cursor in detail to see how it handles motion events.
 serverNewPointer :: TinyWLServer -> Ptr InputDevice -> IO ()
@@ -511,9 +537,8 @@ serverCursorButton tinyWLServer = WlListener $ \ptrEventPointerButton -> do
   maybeViewAtCursorPoint <- desktopViewAt tinyWLServer cursorPosition
 
   pointerNotifyButton seat time32 button buttonState -- Notify the client with pointer focus that a button press has ocurred.
-
   case (buttonState, maybeViewAtCursorPoint) of
-       (ButtonReleased, _)                     -> atomically $ writeTVar (tinyWLServer ^. tsCursorMode) TinyWLCursorPassthrough
+       (ButtonReleased, _)                     -> do atomically $ writeTVar (tinyWLServer ^. tsCursorMode) TinyWLCursorPassthrough
        (ButtonPressed, Just viewAtCursorPoint) ->  do (surfaceAtCursorPoint, _) <- fromJust <$> viewAt viewAtCursorPoint cursorPosition
                                                       focusView viewAtCursorPoint surfaceAtCursorPoint -- Ensure the keyboard has focus if there's a view at point
        (ButtonPressed, Nothing) -> return ()
@@ -559,46 +584,46 @@ renderSurface  ptrWlrSurface surfaceDimension@(SurfaceDimension (sx, sy)) render
   ptrTimeSpec             <- malloc                                              :: IO (Ptr TimeSpec)
   poke                    ptrTimeSpec timeSpec
 
-  [C.exp| void {struct wlr_output        * output        = $(struct wlr_output        * ptrWlrOutput');
-                struct wlr_output_layout * output_layout = $(struct wlr_output_layout * ptrWlrOutputLayout');
-                struct wlr_renderer      * renderer      = $(struct wlr_renderer      * renderer');
-                struct wlr_surface       * surface       = $(struct wlr_surface       * ptrWlrSurface');
-                struct timespec          * time_spec     = $(struct timespec          * ptrTimeSpec);
-                int                        sx            = $(int                        sx');
-                int                        sy            = $(int                        sy');
-                double                     lx            = $(double                     lx');
-                double                     ly            = $(double                     ly');
+  [C.block| void {struct wlr_output        * output        = $(struct wlr_output        * ptrWlrOutput');
+                  struct wlr_output_layout * output_layout = $(struct wlr_output_layout * ptrWlrOutputLayout');
+                  struct wlr_renderer      * renderer      = $(struct wlr_renderer      * renderer');
+                  struct wlr_surface       * surface       = $(struct wlr_surface       * ptrWlrSurface');
+                  struct timespec          * time_spec     = $(struct timespec          * ptrTimeSpec);
+                  int                        sx            = $(int                        sx');
+                  int                        sy            = $(int                        sy');
+                  double                     lx            = $(double                     lx');
+                  double                     ly            = $(double                     ly');
 
-                //1. Get texture
-                struct wlr_texture *texture = wlr_surface_get_texture(surface);
-                if (texture == NULL) {
-                        return;
-                }
-                double ox = 0, oy = 0;
+                  //1. Get texture
+                  struct wlr_texture *texture = wlr_surface_get_texture(surface);
+                  if (texture == NULL) {
+                          return;
+                  }
+                  double ox = 0, oy = 0;
 
-                //2. Construct transform from surface->output
-                wlr_output_layout_output_coords(
-                                output_layout, output, &ox, &oy);
-                ox += lx + sx, oy += ly + sy;
+                  //2. Construct transform from surface->output
+                  wlr_output_layout_output_coords(
+                                  output_layout, output, &ox, &oy);
+                  ox += lx + sx, oy += ly + sy;
 
-                struct wlr_box box = {
-                        .x = ox * output->scale,
-                        .y = oy * output->scale,
-                        .width = surface->current.width * output->scale,
-                        .height = surface->current.height * output->scale,
-                };
+                  struct wlr_box box = {
+                          .x = ox * output->scale,
+                          .y = oy * output->scale,
+                          .width = surface->current.width * output->scale,
+                          .height = surface->current.height * output->scale,
+                  };
 
-                float matrix[9];
-                enum wl_output_transform transform =
-                        wlr_output_transform_invert(surface->current.transform);
-                wlr_matrix_project_box(matrix, &box, transform, 0,
-                        output->transform_matrix);
+                  float matrix[9];
+                  enum wl_output_transform transform =
+                          wlr_output_transform_invert(surface->current.transform);
+                  wlr_matrix_project_box(matrix, &box, transform, 0,
+                          output->transform_matrix);
 
-                //3. Render
-                wlr_render_texture_with_matrix(renderer, texture, matrix, 1);
+                  //3. Render
+                  wlr_render_texture_with_matrix(renderer, texture, matrix, 1);
 
-                //4. Tell the client we're done rendering so it can start drawing the next frame
-                wlr_surface_send_frame_done(surface, time_spec); //time_spec references aren't used after this call, so we can safely delete the memory
+                  //4. Tell the client we're done rendering so it can start drawing the next frame
+                  wlr_surface_send_frame_done(surface, time_spec); //time_spec references aren't used after this call, so we can safely delete the memory
                } |]
   free ptrTimeSpec
   return ()

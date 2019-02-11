@@ -52,6 +52,12 @@ ghc-options:
   - -fwarn-incomplete-uni-patterns
   - -fwarn-incomplete-record-updates
   - -fobject-code 
+  - -debug
+  - -ddump-splices
+
+# cc-options:
+# - -fPIC
+# - -pg
 
 default-extensions:
   - MultiParamTypeClasses
