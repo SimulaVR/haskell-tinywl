@@ -1,9 +1,9 @@
 extra-deps:
 - data-flags-0.0.3.4
 - git: https://github.com/SimulaVR/hsroots
-  commit: 2df226ee0301fbe41298a1e028818d0a5605265a
-- git: https://github.com/SimulaVR/hayland
-  commit: 7bb7d3dbe97bf5ec38697d87da31f3e00f992494
+  commit: 4eb41e73a75cd05c6cf2baf0e7c20deea26f713b
+- git: https://github.com/SimulaVR/haskell-wayland
+  commit: f51e19511fdb13f747ae57d9aad6752fdaea6bb6
 - git: https://github.com/Ongy/haskell-xkbcommon.git
   commit: a1455b51c053289b1b5b27d19d4159180647228d
 - git: https://github.com/georgewsinger/libinput

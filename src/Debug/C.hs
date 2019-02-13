@@ -54,6 +54,7 @@ data C'WlrXdgSurface
 data C'WlrEventKeyboardKey
 data C'WlrSeatPointerState
 data C'WlrSeatClient
+data C'WlSeatCapability
   
 data C'WlSignal
 data C'WlListener -- HsRoots treats this type subtly; see Marshal.hs and Signal.hsc in HsRoots
@@ -96,6 +97,7 @@ initializeTinyWLCtx = C.context $ C.baseCtx <> C.funCtx <> mempty {
   ,  (C.Struct "timespec", [t|TimeSpec|])
   ,  (C.Struct "wl_signal", [t|C'WlSignal|])
   ,  (C.TypeName "wlr_surface_iterator_func_t", [t|C'WlrSurfaceIteratorFuncT|])
+  ,  (C.Enum  "wl_seat_capability", [t|C'WlSeatCapability|])
   -- Omitted XKB Types: xkb_keysym_t, xkb_state, xkb_rule_names, xkb_context, xkb_keymap
 -- (C.TypeName "wl_shm_format_argb8888", [t|C'WlShmFormatArgb8888|])
 -- (C.TypeName "wl_keyboard_key_state", [t|C'WlKeyboardKeyState|])
@@ -130,3 +132,4 @@ initializeTinyWLCtxAndIncludes = do
   C.include "<time.h>"
   C.include "<stdlib.h>"
   C.include "<stdalign.h>"
+  C.include "<tinywl.h>"

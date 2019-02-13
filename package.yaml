@@ -39,9 +39,11 @@ pkg-config-dependencies:
   - udev
   - wayland-server
   - libinput
+  - pixman-1
 
 c-sources:
    - cbits/xdg-shell-protocol.c
+   - cbits/tinywl.c
 include-dirs:
   - include
 

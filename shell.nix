@@ -17,9 +17,15 @@ pkgs.haskell.lib.buildStackProject {
                              udev
                              cabal-install
                              pkgconfig
+                             pixman
                              (callPackage ./nix/libdrm.nix { } )
+                             # Failed attempts to fix EGL driver issues
+                             # See: https://www.reddit.com/r/NixOS/comments/apnzla/using_egl_drivers_in_haskellstacknonnixos_project/
+                             # cairo
+                             # mesa_glu
                           ];
 
   LANG = "en_US.UTF-8";
   TMPDIR = "/tmp";
+  XDG_RUNTIME_DIR = builtins.getEnv "XDG_RUNTIME_DIR";
 }

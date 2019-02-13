@@ -165,13 +165,10 @@ removeTinyWLViewFromList tinyWLView list = filter (not . isSameView tinyWLView) 
 -- use that to extract a Ptr WlrSurface. For now I'll keep the second argument
 -- (which seems redundant) to mirror the C implementation.
 focusView :: TinyWLView -> Ptr WlrSurface -> IO ()
-focusView tinyWLView ptrWlrSurface | trace ("focusView called with (xdgSurface, ptrWlrSurface): " ++ (show (tinyWLView ^. tvXdgSurface)) ++ ", " ++ (show ptrWlrSurface)) False = undefined
 focusView tinyWLView ptrWlrSurface = do
   let ptrWlrSeat =_tsSeat (_tvServer tinyWLView)
   prevSurface <- getKeyboardFocus (getKeyboardState ptrWlrSeat)
-  when (ptrWlrSurface /= prevSurface) $ do putStrLn $ "prevSurface (seat->keyboard_state.focused_surface) at the beginning of focusView: " ++ (show prevSurface)
-                                           putStrLn $ "(ptrWlrSurface /= prevSurface: " ++ (show (ptrWlrSurface /= prevSurface))
-                                           when (prevSurface /= nullPtr) $ deactivatePreviouslyFocusedSurface prevSurface
+  when (ptrWlrSurface /= prevSurface) $ do when (prevSurface /= nullPtr) $ deactivatePreviouslyFocusedSurface prevSurface
                                            mutateViewToFront tinyWLView
                                            setActivated (_tvXdgSurface tinyWLView) True
                                            keyboardNotifyEnterIntoNewSurface ptrWlrSeat (_tvXdgSurface tinyWLView)
@@ -181,7 +178,6 @@ focusView tinyWLView ptrWlrSurface = do
             let prevSurface' = (toInlineC prevSurface) :: Ptr C'WlrSurface
             prevSurfaceXdg <- [C.exp| struct wlr_xdg_surface * { wlr_xdg_surface_from_wlr_surface( $(struct wlr_surface * prevSurface') ) }|] -- hsroots lacks this function so we use inline-C
             setActivated (toC2HS prevSurfaceXdg) False
-            return ()
         mutateViewToFront tinyWLView = do
             let server = (_tvServer tinyWLView)
             serverViews <- atomically $ readTVar (_tsViews server)
@@ -194,14 +190,9 @@ focusView tinyWLView ptrWlrSurface = do
               (Nothing, _)               -> putStrLn "Couldn't get keyboard!"
               (_, Nothing)               -> putStrLn "Couldn't get surface!"
               (Just ptrWlrKeyboard, Just surface) -> do
-                putStrLn $ "view->xdg_surface->surface (inside focusView): " ++ (show surface)
                 (keycodes, numKeycodes) <- getKeyboardKeys ptrWlrKeyboard
                 let modifiers = getModifierPtr ptrWlrKeyboard
-                keyboardNotifyEnter ptrWlrSeat surface keycodes numKeycodes modifiers -- Should set focused_surface to surface, but doesn't.
-                let seat' = toInlineC ptrWlrSeat
-                let surface' = toInlineC surface
-                seatKeyboardStateFocusedSurface <- [C.block| struct wlr_surface * {return $(struct wlr_seat * seat')->keyboard_state.focused_surface;} |]
-                putStrLn $ "seat->keyboard_state.focused_surface (at the end of focusView): " ++ (show seatKeyboardStateFocusedSurface)
+                keyboardNotifyEnter ptrWlrSeat surface keycodes numKeycodes modifiers -- <-- doesn't work
 
 -- | A wl_listener that (i) sets the TinyWLKeyboard as active in the seat (since
 -- | wayland forces us to have one active keyboard as a time per seat) and (ii) sends
@@ -285,7 +276,7 @@ serverNewKeyboard server device = do
         setKeymapAndRepeatInfo keyboard keymap = do
           withKeymap keymap (\keyMapC -> setKeymap keyboard keyMapC)
           let keyboard' = toInlineC keyboard
-          [C.exp| void { wlr_keyboard_set_repeat_info($(struct wlr_keyboard * keyboard'), 25, 600) }|] -- hsroots doesn't provide this call.
+          [C.block| void { wlr_keyboard_set_repeat_info($(struct wlr_keyboard * keyboard'), 25, 600); }|] -- hsroots doesn't provide this call.
 
         handleSignals :: TinyWLKeyboard -> Ptr WlrKeyboard -> IO ([ListenerToken])
         handleSignals tinyWLKeyboard keyboard = do
@@ -296,12 +287,8 @@ serverNewKeyboard server device = do
           token2 <- addListener (_tkKey tinyWLKeyboard)       keySignalKey' -- a = EventKey
 
           let seat' = toInlineC (server ^. tsSeat)
-          keyboardFocusChangeSignal' <- [C.exp| struct wl_signal * { &($(struct wlr_seat * seat')->keyboard_state.events.focus_change)}|]
-          let keyboardFocusChangeSignal = (toC2HS keyboardFocusChangeSignal') :: Ptr (WlSignal ())
 
-          token3 <- addListener (keyboardHandleFocusChange tinyWLKeyboard) keyboardFocusChangeSignal
-
-          let tokens = [token1, token2, token3]
+          let tokens = [token1, token2]
           return tokens
 
         makeKeyboardActiveHead :: TinyWLKeyboard -> IO ()
@@ -310,22 +297,12 @@ serverNewKeyboard server device = do
           keyboardList <- atomically $ readTVar (_tsKeyboards server)
           atomically $ writeTVar (_tsKeyboards server) ([tinyWLKeyboard] ++ keyboardList)
 
-        keyboardHandleFocusChange :: TinyWLKeyboard -> WlListener ()
-        keyboardHandleFocusChange tinyWLKeyboard = WlListener $ \ptr -> do
-          ns <- [C.block| struct wlr_surface * {
-                                  struct wlr_seat_keyboard_focus_change_event * event;
-                                  event = (struct wlr_seat_keyboard_focus_change_event *) $(void * ptr);
-                                  //printf("seat: %p\nold_surface: %p\nnew_surface: %p", event->seat, event->old_surface, event->new_surface);
-                                  //printf("new_surface: %p", event->new_surface);
-                                  return event->new_surface;
-              } |]
-          putStrLn $ "New surface focused on: " ++ (show ns)
-
 -- | Here we just wrap a call to wlr_cursor_attach_input_device. The reason this function is so simple is that we all pointer handling is proxied through wlr_cursor by default. VR inputs will likely involve studying wlr_cursor in detail to see how it handles motion events.
 serverNewPointer :: TinyWLServer -> Ptr InputDevice -> IO ()
 serverNewPointer tinyWLServer device = do
   let cursor = (_tsCursor tinyWLServer)
   attachInputDevice cursor device
+
 -- | This wl_listener is called when TinyWL gets a new wlr_input_device. We (i)
 -- | inspect the wlr_input_device to see whether it is a keyboard or a pointer,
 -- | passing it to serverNew* accordingly; (ii) set the wlr_seat's "capabilities" as
@@ -340,16 +317,21 @@ serverNewInput tinyWLServer = WlListener $ \device ->
          (DeviceKeyboard _) -> (serverNewKeyboard tinyWLServer device)
          (DevicePointer  _) -> (serverNewPointer tinyWLServer  device)
          _                  -> putStrLn "TinyWL does not know how to handle this input type."
+
+     keyboardList <- atomically $ readTVar (_tsKeyboards tinyWLServer)
+
      -- Note that Graphics.Wayland.Internal.SpliceServerTypes code generates the following:
      --   newtype SeatCapability = SeatCapability GHC.Types.Int
      -- Now see: https://github.com/swaywm/hsroots/blob/f9b07af96dff9058a3aac59eba5a608a91801c0a/src/Graphics/Wayland/WlRoots/Input.hsc#L48
-     let mouseCapability = SeatCapability (deviceTypeToInt (DevicePointer nullPtr))
-     let keyboardCapability = SeatCapability (deviceTypeToInt (DeviceKeyboard nullPtr))
-     let mouseCapabilities = [mouseCapability] :: [SeatCapability]
-     let allCapabilities = [mouseCapability, keyboardCapability] :: [SeatCapability]
-     keyboardList <- atomically $ readTVar (_tsKeyboards tinyWLServer)
+     -- EDIT: We cannot use deviceToInt as it gets us WLR_* enums and we need WL_SEAT_* enums.
+     keyboardCapability' <- fromIntegral <$> [C.exp| int wl_seat_capability { WL_SEAT_CAPABILITY_KEYBOARD } |]
+     pointerCapability' <- fromIntegral <$> [C.exp| int wl_seat_capability { WL_SEAT_CAPABILITY_POINTER } |]
+     let pointerCapability = SeatCapability pointerCapability'
+     let keyboardCapability = SeatCapability keyboardCapability'
+     let pointerCapabilities = [pointerCapability] :: [SeatCapability]
+     let allCapabilities = [pointerCapability, keyboardCapability] :: [SeatCapability]
      let capabilities = if (null keyboardList)
-                            then mouseCapabilities
+                            then pointerCapabilities
                             else allCapabilities
      setSeatCapabilities seat capabilities
 

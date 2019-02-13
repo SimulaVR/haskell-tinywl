@@ -154,3 +154,9 @@ main = mdo setLogPrio Debug
                            f
         getListenerFunc :: WlListener a -> (Ptr a -> IO ())
         getListenerFunc (WlListener func) = func
+
+-- | This launches the C implementation of tinywl (useful for test purposes).
+tinyWLC :: IO ()
+tinyWLC = do
+  [C.block| int { tinywl();}|]
+  return ()

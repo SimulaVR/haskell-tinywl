@@ -184,6 +184,10 @@ instance FFI (Ptr C'WlSignal) (Ptr (WlSignal a)) where
   toC2HS = castPtr
   toInlineC = castPtr
 
+instance FFI (Ptr C'WlrInputDevice) (Ptr InputDevice) where
+  toC2HS = castPtr
+  toInlineC = castPtr
+
 -- |This function allows us to cast to HsRoot's `newtype WlListener a = WlListener (Ptr a -> IO ())`.
 -- |AFAIK, there is no straightforward way to add these types to FFI.
 toHsRootsListener :: Ptr C'WlListener -> IO (WlListener a)
